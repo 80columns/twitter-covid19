@@ -82,30 +82,42 @@ namespace cs_covid19_data_pull {
             "agra",
             "jaipur"
         };
-        #endregion
-
-        private static readonly string[] exclusionStrings = new string[] {
+        private static readonly string[] exclusionTerms = new string[] {
             "need",
             "needed",
+            "needs",
             "required",
-            "urgent help",
-            "please help",
             "patient",
-            "plz help",
-            "pls help",
+            "\"request for\"",
+            "\"urgent help\"",
+            "\"please help\"",
+            "\"plz help\"",
+            "\"pls help\""
+        };
+        #endregion
+
+        // separate exclusion terms here due to twitter length restriction on query string
+        private static readonly string[] exclusionStrings = new string[] {
             "admitted to",
             "immediate requirement",
             "bot link",
             "urgently looking",
             "needs a plasma donor",
             "urgent requirement",
-            "urgently looking",
             "any potential",
             "looking for a",
             "my close friend",
             "condition is severe",
             "currently hospitalised",
-            "needs icu"
+            "needs icu",
+            "requirement:",
+            "help with an",
+            "#plasmarequirement",
+            "#urgenthelp",
+            "requirements",
+            "help please",
+            "condition is serious",
+            "requirement-"
         };
         private static readonly Dictionary<string, string[]> resourceAdditionalDetails = new() {
             ["plasma"] = new string[] { "[^a-z]a\\+", "[^a-z]a\\-", "[^a-z]b\\+", "[^a-z]b\\-", "[^a-z]o\\+", "[^a-z]o\\-", "[^a-z]ab\\+", "[^a-z]ab\\-" },
@@ -145,7 +157,7 @@ namespace cs_covid19_data_pull {
             logger.LogInformation($"Next timer schedule at: {myTimer.ScheduleStatus.Next}");
 
             var usingPresetData = false;
-            var twitterPosts = usingPresetData ? ReadLocalData() : await FetchTwitterData(TimeSpan.FromMinutes(30));
+            var twitterPosts = usingPresetData ? ReadLocalData() : await FetchTwitterData(TimeSpan.FromMinutes(60));
 
             LogData(twitterPosts);
         }
@@ -162,49 +174,52 @@ namespace cs_covid19_data_pull {
             var maxResults = 100;
 
             foreach (var location in locationTerms) {
-                var queryString = HttpUtility.UrlEncode(
-                    "-is:retweet"
-                    + $" {location}"
-                    + $" ({string.Join(" OR ", phoneTerms)})"
-                    + $" ({string.Join(" OR ", resourceTerms)})"
-                );
+                foreach (var resource in resourceTerms) {
+                    var queryString = HttpUtility.UrlEncode(
+                        "-is:retweet"
+                     + $" {location}"
+                     + $" {resource}"
+                     + $" -{string.Join(" -", exclusionTerms)}"
+                     + $" ({string.Join(" OR ", phoneTerms)})"
+                    );
 
-                do {
-                    using (var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.twitter.com/2/tweets/search/recent?start_time={startTimeString}&query={queryString}&tweet.fields={tweetFields}&max_results={maxResults}")) {
-                        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Environment.GetEnvironmentVariable("TWITTER_API_OAUTH_TOKEN"));
+                    do {
+                        using (var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.twitter.com/2/tweets/search/recent?start_time={startTimeString}&query={queryString}&tweet.fields={tweetFields}&max_results={maxResults}")) {
+                            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Environment.GetEnvironmentVariable("TWITTER_API_OAUTH_TOKEN"));
 
-                        using (var response = await httpClient.SendAsync(request)) {
-                            var responseString = await response.Content.ReadAsStringAsync();
-                            twitterSearchResult = JsonConvert.DeserializeObject<TwitterSearchResult>(responseString);
+                            using (var response = await httpClient.SendAsync(request)) {
+                                var responseString = await response.Content.ReadAsStringAsync();
+                                twitterSearchResult = JsonConvert.DeserializeObject<TwitterSearchResult>(responseString);
 
-                            if (
-                                twitterSearchResult?.data != null
-                                && twitterSearchResult.data.Any()
-                            ) {
-                                twitterPosts.AddRange(twitterSearchResult.data.Where(post => CheckPhoneNumber(post)).Where(post => CheckExclusionTerms(post));
-                            } else {
-                                logger.LogInformation($"no results returned when looking for posts with location {location} after {startTime} UTC");
+                                if (
+                                    twitterSearchResult?.data != null
+                                    && twitterSearchResult.data.Any()
+                                ) {
+                                    twitterPosts.AddRange(twitterSearchResult.data.Where(post => CheckPhoneNumber(post)).Where(post => CheckExclusionStrings(post)));
+                                } else {
+                                    logger.LogInformation($"no results returned when looking for posts with location {location} after {startTime} UTC");
+                                }
                             }
                         }
-                    }
 
-                    // sleep 200 ms to add delay to the requests
-                    Thread.Sleep(200);
+                        // sleep 200 ms to add delay to the requests
+                        Thread.Sleep(200);
 
-                    logger.LogInformation($"got {twitterSearchResult.meta.result_count} posts from twitter api on iteration {iteration}");
+                        logger.LogInformation($"got {twitterSearchResult.meta.result_count} posts from twitter api on iteration {iteration}");
 
-                    iteration++;
+                        iteration++;
 
-                    if ((iteration + 1) % 450 == 0) {
-                        logger.LogInformation($"sleeping for 15 minutes, {iteration} requests have been made so far");
+                        if ((iteration + 1) % 450 == 0) {
+                            logger.LogInformation($"sleeping for 15 minutes, {iteration} requests have been made so far");
 
-                        // if 450 requests have been made, sleep for 15 minutes until the next batch of requests can start
-                        // 1_000 ms (1 sec) * 60 sec/min * 15 min = 900 sec
-                        Thread.Sleep(1_000 * 60 * 15);
+                            // if 450 requests have been made, sleep for 15 minutes until the next batch of requests can start
+                            // 1_000 ms (1 sec) * 60 sec/min * 15 min = 900 sec
+                            Thread.Sleep(1_000 * 60 * 15);
 
-                        logger.LogInformation($"finished sleeping for 15 minutes, resuming data pull");
-                    }
-                } while (twitterSearchResult.meta.next_token != null);
+                            logger.LogInformation($"finished sleeping for 15 minutes, resuming data pull");
+                        }
+                    } while (twitterSearchResult.meta.next_token != null);
+                }
             }
 
             logger.LogInformation($"got {twitterPosts.Count} total matching posts from twitter api after {iteration} iterations");
@@ -238,16 +253,16 @@ namespace cs_covid19_data_pull {
 
                     var matchingLocations = locationTerms.Where(location => post.text.ToLower().Contains(location));
                     var matchingResources = resourceTerms.Where(resource => post.text.ToLower().Contains(resource));
-                    var additionalDetails = new List<string>();
+                    var resourceDetails = new List<string>();
 
                     foreach (var resource in matchingResources) {
                         if (resourceAdditionalDetails.ContainsKey(resource)) {
-                            foreach (var additionalItem in resourceAdditionalDetails[resource]) {
-                                if (Regex.IsMatch(post.text.ToLower(), additionalItem)) {
+                            foreach (var resourceItem in resourceAdditionalDetails[resource]) {
+                                if (Regex.IsMatch(post.text.ToLower(), resourceItem)) {
                                     if (resource == "plasma") {
-                                        additionalDetails.Add(CapitalizeWord(additionalItem[(additionalItem.IndexOf(']') + 1)..].Replace("\\", string.Empty)));
+                                        resourceDetails.Add(CapitalizeWord(resourceItem[(resourceItem.IndexOf(']') + 1)..].Replace("\\", string.Empty)));
                                     } else {
-                                        additionalDetails.Add(CapitalizeWord(additionalItem));
+                                        resourceDetails.Add(CapitalizeWord(resourceItem));
                                     }
                                 }
                             }
@@ -255,12 +270,12 @@ namespace cs_covid19_data_pull {
                     }
 
                     AddSpreadsheetRow(
-                        string.Join(", ", matchingLocations.Select(location => CapitalizeWord(location))),
-                        string.Join(", ", matchingResources.Select(resource => CapitalizeWord(resource))),
-                        number,
-                        post.created_at,
-                        post.text,
-                        string.Join(", ", additionalDetails)
+                        _locations: string.Join(", ", matchingLocations.Select(location => CapitalizeWord(location))),
+                        _resources: string.Join(", ", matchingResources.Select(resource => CapitalizeWord(resource))),
+                        _resourcesDetails: string.Join(", ", resourceDetails),
+                        _phoneNumber: number,
+                        _dateTweeted: post.created_at,
+                        _tweetText: post.text
                     );
 
                     logger.LogInformation($"id: {post.id}, locations: {string.Join(", ", matchingLocations)}, resources: {string.Join(", ", matchingResources)}, phone #: {number}, date tweeted: {post.created_at}");
@@ -283,26 +298,26 @@ namespace cs_covid19_data_pull {
             return phoneNumberMatch;
         }
 
-        public static bool CheckExclusionTerms(TwitterPost _post) {
+        public static bool CheckExclusionStrings(TwitterPost _post) {
             return exclusionStrings.Any(term => _post.text.ToLower().Contains(term)) == false;
         }
 
         public static void AddSpreadsheetRow(
             string _locations,
             string _resources,
+            string _resourcesDetails,
             string _phoneNumber,
             string _dateTweeted,
-            string _tweetText,
-            string _additionalDetails
+            string _tweetText
         ) {
             var row = new GoogleSheetRow() {
                 Cells = new List<GoogleSheetCell>() {
                     new GoogleSheetCell() { CellValue = _locations },
                     new GoogleSheetCell() { CellValue = _resources },
+                    new GoogleSheetCell() { CellValue = _resourcesDetails },
                     new GoogleSheetCell() { CellValue = _phoneNumber },
                     new GoogleSheetCell() { CellValue = _dateTweeted },
                     new GoogleSheetCell() { CellValue = _tweetText.Replace("\\n", "\n") },
-                    new GoogleSheetCell() { CellValue = _additionalDetails }
                 }
             };
 
@@ -312,6 +327,10 @@ namespace cs_covid19_data_pull {
         public static string CapitalizeWord(string word) {
             if (word.ToLower() == "icu") {
                 return "ICU";
+            } else if (word.ToLower() == "ab+") {
+                return "AB+";
+            } else if (word.ToLower() == "ab-") {
+                return "AB-";
             } else {
                 return word.Length >= 2 ? word.Substring(0, 1).ToUpper() + word[1..] : word.ToUpper();
             }

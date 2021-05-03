@@ -102,7 +102,7 @@ namespace twitter {
         public void AppendRows(List<GoogleSheetRow> rows, string sheetName) {
             if (this.currentRequestCount >= this.maxRequestCountPerMinute) {
                 // sleep for 1 minute before making more requests
-                Thread.Sleep(60_000);
+                Thread.Sleep(1_000 * 60);
 
                 this.currentRequestCount = 0;
             }
