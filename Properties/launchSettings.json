@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "twitter": {
+      "commandName": "Project",
+      "nativeDebugging": true
+    }
+  }
+}
