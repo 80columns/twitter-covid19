@@ -162,7 +162,7 @@ namespace cs_covid19_data_pull {
 
         [Function("TwitterDataPull")]
         public static async Task Run(
-            [TimerTrigger("0 */5 * * * *" // run every 5 minutes for azure function prod test
+            [TimerTrigger("0 0 */2 * * *"
                 #if DEBUG
                 , RunOnStartup=true // https://stackoverflow.com/a/51775445
                 #endif
