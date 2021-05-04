@@ -2,6 +2,7 @@
 using Google.Apis.Services;
 using Google.Apis.Sheets.v4;
 using Google.Apis.Sheets.v4.Data;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
@@ -99,12 +100,33 @@ namespace twitter {
             return returnValues;
         }
 
-        public void AppendRows(List<GoogleSheetRow> rows, string sheetName) {
+        public HashSet<string> GetAllColumnValues(string sheetName, string columnName) {
+            var columnValues = new HashSet<string>();
+
+            var range = $"{sheetName}!{columnName}:{columnName}";
+            var request = sheetsService.Spreadsheets.Values.Get(spreadsheetId, range);
+
+            var response = request.Execute();
+
+            if (response.Values != null && response.Values.Count > 0) {
+                foreach (var cell in response.Values) {
+                    columnValues.Add(Convert.ToString(cell[0]));
+                }
+            }
+
+            return columnValues;
+        }
+
+        public void AppendRows(List<GoogleSheetRow> rows, string sheetName, ILogger logger) {
             if (this.currentRequestCount >= this.maxRequestCountPerMinute) {
+                logger.LogInformation($"current google sheets request count is {this.currentRequestCount} and max request count is {this.maxRequestCountPerMinute}, sleeping for 1 minute...");
+
                 // sleep for 1 minute before making more requests
                 Thread.Sleep(1_000 * 60);
 
                 this.currentRequestCount = 0;
+
+                logger.LogInformation($"finished sleeping for 1 minute");
             }
 
             var requests = new BatchUpdateSpreadsheetRequest { Requests = new List<Request>() };

@@ -1,3 +1,5 @@
+using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
@@ -8,6 +10,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -57,7 +60,7 @@ namespace cs_covid19_data_pull {
             "beds",
             "ventilator",
             "icu",
-            "remdesivir",
+            //"remdesivir",
             "tocilizumab",
             "fabiflu",
             "favipiravir",
@@ -66,21 +69,32 @@ namespace cs_covid19_data_pull {
             "tiffin"
         };
         private static readonly string[] locationTerms = new string[] {
-            "mumbai",
-            "delhi",
+            "allahabad",
+            "prayagraj",
             "pune",
-            "nagpur",
             "nashik",
+            "nasik",
+            "nagpur",
+            "mumbai",
+            "bombay",
+            "chennai",
+            "thane",
+            "delhi",
+            "gurgaon",
+            "ghaziabad",
             "bengaluru",
             "bangalore",
-            "hyderabad",
-            "faridagad",
-            "gurgaon",
-            "kanpur",
+            "lucknow",
             "varanasi",
-            "prayagraj",
-            "agra",
-            "jaipur"
+            "kanpur",
+            "indore",
+            "ahmedabad",
+            "amdavad",
+            "patna",
+            "bhopal",
+            "hyderabad",
+            "vijaywada",
+            "kolkata"
         };
         private static readonly string[] exclusionTerms = new string[] {
             "need",
@@ -117,7 +131,10 @@ namespace cs_covid19_data_pull {
             "requirements",
             "help please",
             "condition is serious",
-            "requirement-"
+            "requirement-",
+            "can you help",
+            "relative",
+            "symptoms"
         };
         private static readonly Dictionary<string, string[]> resourceAdditionalDetails = new() {
             ["plasma"] = new string[] { "[^a-z]a\\+", "[^a-z]a\\-", "[^a-z]b\\+", "[^a-z]b\\-", "[^a-z]o\\+", "[^a-z]o\\-", "[^a-z]ab\\+", "[^a-z]ab\\-" },
@@ -130,17 +147,22 @@ namespace cs_covid19_data_pull {
         // google sheets helper with spreadsheet id
         private static GoogleSheetsHelper googleSheet = new(Environment.GetEnvironmentVariable("GOOGLE_SHEET_ID"));
 
+        // azure blob client
+        private static BlobServiceClient blobServiceClient = new(Environment.GetEnvironmentVariable("AZURE_STORAGE_CONNECTION_STRING"));
+
+        // list of historical unique phone numbers
+        private static Dictionary<string, DateTimeOffset> historicalPhoneNumbers;
+        private static Dictionary<string, DateTimeOffset> currentRunPhoneNumbers = new();
+
         // run this function once every two hours at the start of the hour, e.g. 12:00 am, 2:00 am, 4:00 am etc.
         // 0 0 */2 * * *
         // see https://docs.microsoft.com/en-us/azure/azure-functions/functions-bindings-timer?tabs=csharp for explanation of cron format
         // for testing, can use this to run every minute
         // 0 */1 * * * *
 
-        // TODO:
-        // - check phone numbers already in spreadsheet and don't create new entries for those phone numbers in the future
         [Function("TwitterDataPull")]
         public static async Task Run(
-            [TimerTrigger("0 0 */2 * * *"
+            [TimerTrigger("0 */5 * * * *" // run every 5 minutes for azure function prod test
                 #if DEBUG
                 , RunOnStartup=true // https://stackoverflow.com/a/51775445
                 #endif
@@ -153,32 +175,61 @@ namespace cs_covid19_data_pull {
 
             logger = context.GetLogger("TwitterDataPull");
 
-            logger.LogInformation($"C# Timer trigger function executed at: {DateTimeOffset.UtcNow}");
+            logger.LogInformation($"Script started at: {DateTimeOffset.UtcNow}");
             logger.LogInformation($"Next timer schedule at: {myTimer.ScheduleStatus.Next}");
 
+            // get the prior phone numbers pulled by the script
+            await LoadUniquePhoneNumbersAsync();
+
             var usingPresetData = false;
-            var twitterPosts = usingPresetData ? ReadLocalData() : await FetchTwitterData(TimeSpan.FromMinutes(60));
+            var twitterPosts = usingPresetData ? ReadLocalData() : await FetchTwitterDataAsync(TimeSpan.FromMinutes(5));
 
             LogData(twitterPosts);
+
+            await SaveUniquePhoneNumbersAsync();
+
+            logger.LogInformation($"Script completed at {DateTimeOffset.UtcNow}");
         }
 
-        public static async Task<List<TwitterPost>> FetchTwitterData(TimeSpan postTimeRange) {
+        public static async Task LoadUniquePhoneNumbersAsync() {
+            var containerClient = blobServiceClient.GetBlobContainerClient("phone-numbers");
+            var blobClient = containerClient.GetBlobClient("phoneNumbers.json");
+
+            using (var destinationStream = new MemoryStream()) {
+                await blobClient.DownloadToAsync(destinationStream);
+
+                var destinationString = Encoding.UTF8.GetString(destinationStream.ToArray());
+
+                historicalPhoneNumbers = JsonConvert.DeserializeObject<Dictionary<string, DateTimeOffset>>(destinationString);
+            }
+        }
+
+        public static async Task SaveUniquePhoneNumbersAsync() {
+            var containerClient = blobServiceClient.GetBlobContainerClient("phone-numbers");
+            var blobClient = containerClient.GetBlobClient("phoneNumbers.json");
+
+            var sourceString = JsonConvert.SerializeObject(historicalPhoneNumbers.Union(currentRunPhoneNumbers).ToDictionary(item => item.Key, item => item.Value));
+
+            await blobClient.UploadAsync(new MemoryStream(Encoding.UTF8.GetBytes(sourceString)), overwrite: true);
+        }
+
+        public static async Task<List<TwitterPost>> FetchTwitterDataAsync(TimeSpan _postTimeRange) {
             var twitterPosts = new List<TwitterPost>();
 
             // find the tweets with the terms in phoneTerms + resourceTerms
             var twitterSearchResult = null as TwitterSearchResult;
-            var startTime = DateTimeOffset.UtcNow.Subtract(postTimeRange);
+            var startTime = DateTimeOffset.UtcNow.Subtract(_postTimeRange);
             var startTimeString = HttpUtility.UrlEncode(startTime.ToString("yyyy-MM-ddTHH:mm:ssZ"));
             var tweetFields = string.Join(",", new string[] { "id", "text", "created_at" });
             var iteration = 0;
             var maxResults = 100;
 
-            foreach (var location in locationTerms) {
-                foreach (var resource in resourceTerms) {
+            for (var i = 0; i < locationTerms.Length; i++) {
+                for (var j = 0; j < resourceTerms.Length; j++) {
                     var queryString = HttpUtility.UrlEncode(
                         "-is:retweet"
-                     + $" {location}"
-                     + $" {resource}"
+                     + $" {locationTerms[i]}"
+                     + $" {resourceTerms[j]}"
                      + $" -{string.Join(" -", exclusionTerms)}"
                      + $" ({string.Join(" OR ", phoneTerms)})"
                     );
@@ -188,35 +239,41 @@ namespace cs_covid19_data_pull {
                             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Environment.GetEnvironmentVariable("TWITTER_API_OAUTH_TOKEN"));
 
                             using (var response = await httpClient.SendAsync(request)) {
-                                var responseString = await response.Content.ReadAsStringAsync();
-                                twitterSearchResult = JsonConvert.DeserializeObject<TwitterSearchResult>(responseString);
+                                if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests) {
+                                    PauseTwitterApi(iteration);
 
-                                if (
-                                    twitterSearchResult?.data != null
-                                    && twitterSearchResult.data.Any()
-                                ) {
-                                    twitterPosts.AddRange(twitterSearchResult.data.Where(post => CheckPhoneNumber(post)).Where(post => CheckExclusionStrings(post)));
+                                    // decrement i and j to retry the same request again after pausing above
+                                    i--;
+                                    j--;
                                 } else {
-                                    logger.LogInformation($"no results returned when looking for posts with location {location} after {startTime} UTC");
+                                    var responseString = await response.Content.ReadAsStringAsync();
+                                    twitterSearchResult = JsonConvert.DeserializeObject<TwitterSearchResult>(responseString);
+
+                                    if (
+                                        twitterSearchResult?.data != null
+                                     && twitterSearchResult.data.Any()
+                                    ) {
+                                        twitterPosts.AddRange(
+                                            twitterSearchResult.data.Where(post => twitterPosts.All(currentPost => currentPost.id != post.id))
+                                                                    .Where(post => ValidatePhoneNumber(post))
+                                                                    .Where(post => CheckExclusionStrings(post))
+                                        );
+                                    } else {
+                                        logger.LogInformation($"no results returned when looking for posts with location {locationTerms[i]} and resource {resourceTerms[j]} after {startTime} UTC");
+                                    }
+
+                                    // sleep 200 ms to add delay to the requests
+                                    Thread.Sleep(200);
+
+                                    logger.LogInformation($"got {twitterSearchResult.meta.result_count} posts from twitter api on iteration {iteration}");
+
+                                    iteration++;
+
+                                    if ((iteration + 1) % 450 == 0) {
+                                        PauseTwitterApi(iteration);
+                                    }
                                 }
                             }
-                        }
-
-                        // sleep 200 ms to add delay to the requests
-                        Thread.Sleep(200);
-
-                        logger.LogInformation($"got {twitterSearchResult.meta.result_count} posts from twitter api on iteration {iteration}");
-
-                        iteration++;
-
-                        if ((iteration + 1) % 450 == 0) {
-                            logger.LogInformation($"sleeping for 15 minutes, {iteration} requests have been made so far");
-
-                            // if 450 requests have been made, sleep for 15 minutes until the next batch of requests can start
-                            // 1_000 ms (1 sec) * 60 sec/min * 15 min = 900 sec
-                            Thread.Sleep(1_000 * 60 * 15);
-
-                            logger.LogInformation($"finished sleeping for 15 minutes, resuming data pull");
                         }
                     } while (twitterSearchResult.meta.next_token != null);
                 }
@@ -227,8 +284,18 @@ namespace cs_covid19_data_pull {
             return twitterPosts;
         }
 
+        public static void PauseTwitterApi(int iteration) {
+            logger.LogInformation($"sleeping for 15 minutes, {iteration} requests have been made so far to twitter api");
+
+            // if 450 requests have been made, sleep for 15 minutes until the next batch of requests can start
+            // 1_000 ms (1 sec) * 60 sec/min * 15 min = 900 sec
+            Thread.Sleep(1_000 * 60 * 15);
+
+            logger.LogInformation($"finished sleeping for 15 minutes, resuming data pull");
+        }
+
         public static List<TwitterPost> ReadLocalData() {
-            var data = File.ReadAllText(@"C:\Users\patri\OneDrive\Desktop\CaregiverSaathiCovid19\cs-covid19-data-pull\twitter\sampleData.json");
+            var data = File.ReadAllText(@"C:\Users\patri\OneDrive\Desktop\CaregiverSaathiCovid19\cs-covid19-data-pull\repo\sampleData.json");
 
             return JsonConvert.DeserializeObject<List<TwitterPost>>(data);
         }
@@ -240,53 +307,80 @@ namespace cs_covid19_data_pull {
             foreach (var post in _twitterPosts) {
                 var phoneNumberMatches = Regex.Matches(post.text, phoneNumberPattern);
 
-                foreach (Match numberMatch in phoneNumberMatches) {
-                    var number = numberMatch.Value.Trim().Replace(" ", string.Empty).Replace("-", string.Empty);
+                if (post.id == "1389475784650334213")
+                {
+                    var x = 10;
+                    logger.LogInformation($"10 {x}");
+                }
 
-                    if (number.Length == 11 && number[0] == '0') {
-                        // handle cell phone numbers starting with 0
-                        number = number.Substring(1, number.Length - 1);
-                    } else if (number.Length == 12 && number.Substring(0, 2) == "91") {
-                        // handle numbers starting with the country code +91
-                        number = number.Substring(2, number.Length - 2);
+                foreach (Match numberMatch in phoneNumberMatches) {
+                    var numberMatchValue = numberMatch.Value.Trim(new char[] { ' ', '-' });
+                    var numbers = new List<string>();
+
+                    if (numberMatchValue.Length > 20 && numberMatchValue.Contains(' ')) {
+                        numbers.AddRange(numberMatchValue.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+                    } else {
+                        numbers.Add(numberMatchValue.Replace(" ", string.Empty).Replace("-", string.Empty));
                     }
 
-                    var matchingLocations = locationTerms.Where(location => post.text.ToLower().Contains(location));
-                    var matchingResources = resourceTerms.Where(resource => post.text.ToLower().Contains(resource));
-                    var resourceDetails = new List<string>();
+                    for (var i = 0; i < numbers.Count; i++) {
+                        var number = numbers[i];
 
-                    foreach (var resource in matchingResources) {
-                        if (resourceAdditionalDetails.ContainsKey(resource)) {
-                            foreach (var resourceItem in resourceAdditionalDetails[resource]) {
-                                if (Regex.IsMatch(post.text.ToLower(), resourceItem)) {
-                                    if (resource == "plasma") {
-                                        resourceDetails.Add(CapitalizeWord(resourceItem[(resourceItem.IndexOf(']') + 1)..].Replace("\\", string.Empty)));
-                                    } else {
-                                        resourceDetails.Add(CapitalizeWord(resourceItem));
+                        if (number.Length == 11 && number[0] == '0') {
+                            // handle cell phone numbers starting with 0
+                            number = number.Substring(1, number.Length - 1);
+                        } else if (number.Length == 12 && number.Substring(0, 2) == "91") {
+                            // handle numbers starting with the country code +91
+                            number = number.Substring(2, number.Length - 2);
+                        }
+
+                        var matchingLocations = locationTerms.Where(location => post.text.ToLower().Contains(location));
+                        var matchingResources = resourceTerms.Where(resource => post.text.ToLower().Contains(resource));
+                        var resourceDetails = new List<string>();
+
+                        foreach (var resource in matchingResources) {
+                            if (resourceAdditionalDetails.ContainsKey(resource)) {
+                                foreach (var resourceItem in resourceAdditionalDetails[resource]) {
+                                    if (Regex.IsMatch(post.text.ToLower(), resourceItem)) {
+                                        if (resource == "plasma") {
+                                            resourceDetails.Add(CapitalizeWord(resourceItem[(resourceItem.IndexOf(']') + 1)..].Replace("\\", string.Empty)));
+                                        } else {
+                                            resourceDetails.Add(CapitalizeWord(resourceItem));
+                                        }
                                     }
                                 }
                             }
                         }
+
+                        if (IsPriorPhoneNumber(number) == false) {
+                            // save phone number for lookup later to ensure we don't process duplicate phone numbers across subsequent runs of this script
+                            if (currentRunPhoneNumbers.ContainsKey(number) == false) {
+                                currentRunPhoneNumbers.Add(number, DateTimeOffset.Parse(post.created_at));
+                            }
+
+                            // add row to the google spreadsheet
+                            AddSpreadsheetRow(
+                                _locations: string.Join(", ", matchingLocations.Select(location => CapitalizeWord(location))),
+                                _resources: string.Join(", ", matchingResources.Select(resource => CapitalizeWord(resource))),
+                                _resourcesDetails: string.Join(", ", resourceDetails),
+                                _phoneNumber: number,
+                                _dateTweeted: post.created_at,
+                                _tweetText: post.text
+                            );
+
+                            logger.LogInformation($"id: {post.id}, locations: {string.Join(", ", matchingLocations)}, resources: {string.Join(", ", matchingResources)}, phone #: {number}, date tweeted: {post.created_at}");
+                            itemsLogged++;
+                        } else {
+                            logger.LogInformation($"id: {post.id}, duplicate phone number {number} found, not adding to spreadsheet");
+                        }
                     }
-
-                    AddSpreadsheetRow(
-                        _locations: string.Join(", ", matchingLocations.Select(location => CapitalizeWord(location))),
-                        _resources: string.Join(", ", matchingResources.Select(resource => CapitalizeWord(resource))),
-                        _resourcesDetails: string.Join(", ", resourceDetails),
-                        _phoneNumber: number,
-                        _dateTweeted: post.created_at,
-                        _tweetText: post.text
-                    );
-
-                    logger.LogInformation($"id: {post.id}, locations: {string.Join(", ", matchingLocations)}, resources: {string.Join(", ", matchingResources)}, phone #: {number}, date tweeted: {post.created_at}");
-                    itemsLogged++;
                 }
             }
 
             logger.LogInformation($"logged {itemsLogged} combinations to output spreadsheet");
         }
 
-        public static bool CheckPhoneNumber(TwitterPost _post) {
+        public static bool ValidatePhoneNumber(TwitterPost _post) {
             logger.LogInformation($"checking tweet {_post.id} for match");
 
             var phoneNumberMatch = Regex.IsMatch(_post.text, @"([\s-]*?[0-9][\s-]*?){10,}");
@@ -296,6 +390,10 @@ namespace cs_covid19_data_pull {
             }
 
             return phoneNumberMatch;
+        }
+
+        public static bool IsPriorPhoneNumber(string _phoneNumber) {
+            return historicalPhoneNumbers.ContainsKey(_phoneNumber);
         }
 
         public static bool CheckExclusionStrings(TwitterPost _post) {
@@ -321,7 +419,7 @@ namespace cs_covid19_data_pull {
                 }
             };
 
-            googleSheet.AppendRows(new List<GoogleSheetRow>() { row }, "Sheet1");
+            googleSheet.AppendRows(new List<GoogleSheetRow>() { row }, "Sheet1", logger);
         }
 
         public static string CapitalizeWord(string word) {

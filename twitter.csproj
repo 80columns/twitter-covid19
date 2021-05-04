@@ -10,9 +10,10 @@
     <DebugSymbols>true</DebugSymbols>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.8.3" />
     <PackageReference Include="Google.Apis.Sheets.v4" Version="1.51.0.2272" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Timer" Version="4.1.0" />
-    <PackageReference Include="Microsoft.Azure.Functions.Worker.Sdk" Version="1.0.2" OutputItemType="Analyzer" />
+    <PackageReference Include="Microsoft.Azure.Functions.Worker.Sdk" Version="1.0.3" OutputItemType="Analyzer" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="1.2.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
   </ItemGroup>
