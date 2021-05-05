@@ -101,40 +101,35 @@ namespace cs_covid19_data_pull {
             "needed",
             "needs",
             "required",
+            "require",
             "patient",
             "\"request for\"",
             "\"urgent help\"",
             "\"please help\"",
             "\"plz help\"",
-            "\"pls help\""
+            "\"pls help\"",
+            "\"bot link\"",
+            "requirement",
+            "requirements",
+            "relative",
+            "symptoms",
+            "\"help please\"",
+            "\"can you help\"",
+            "\"admitted to\"",
+            "condition"
         };
         #endregion
 
         // separate exclusion terms here due to twitter length restriction on query string
         private static readonly string[] exclusionStrings = new string[] {
-            "admitted to",
-            "immediate requirement",
-            "bot link",
             "urgently looking",
             "needs a plasma donor",
-            "urgent requirement",
             "any potential",
             "looking for a",
             "my close friend",
-            "condition is severe",
             "currently hospitalised",
-            "needs icu",
-            "requirement:",
             "help with an",
-            "#plasmarequirement",
-            "#urgenthelp",
-            "requirements",
-            "help please",
-            "condition is serious",
-            "requirement-",
-            "can you help",
-            "relative",
-            "symptoms"
+            "#urgenthelp"
         };
         private static readonly Dictionary<string, string[]> resourceAdditionalDetails = new() {
             ["plasma"] = new string[] { "[^a-z]a\\+", "[^a-z]a\\-", "[^a-z]b\\+", "[^a-z]b\\-", "[^a-z]o\\+", "[^a-z]o\\-", "[^a-z]ab\\+", "[^a-z]ab\\-" },
@@ -162,7 +157,7 @@ namespace cs_covid19_data_pull {
 
         [Function("TwitterDataPull")]
         public static async Task Run(
-            [TimerTrigger("0 0 */2 * * *"
+            [TimerTrigger("0 0 0 */1 * *" // 1 day script trigger time for manual pulls
                 #if DEBUG
                 , RunOnStartup=true // https://stackoverflow.com/a/51775445
                 #endif
@@ -182,11 +177,13 @@ namespace cs_covid19_data_pull {
             await LoadUniquePhoneNumbersAsync();
 
             var usingPresetData = false;
-            var twitterPosts = usingPresetData ? ReadLocalData() : await FetchTwitterDataAsync(TimeSpan.FromMinutes(5));
+            var twitterPosts = usingPresetData ? ReadLocalData() : await FetchTwitterDataAsync(TimeSpan.FromHours(12));
 
             LogData(twitterPosts);
 
             await SaveUniquePhoneNumbersAsync();
+
+            AppendCompletionSpreadsheetRow();
 
             logger.LogInformation($"Script completed at {DateTimeOffset.UtcNow}");
         }
@@ -223,6 +220,7 @@ namespace cs_covid19_data_pull {
             var tweetFields = string.Join(",", new string[] { "id", "text", "created_at" });
             var iteration = 0;
             var maxResults = 100;
+            var nextToken = string.Empty;
 
             for (var i = 0; i < locationTerms.Length; i++) {
                 for (var j = 0; j < resourceTerms.Length; j++) {
@@ -235,7 +233,11 @@ namespace cs_covid19_data_pull {
                     );
 
                     do {
-                        using (var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.twitter.com/2/tweets/search/recent?start_time={startTimeString}&query={queryString}&tweet.fields={tweetFields}&max_results={maxResults}")) {
+                        var requestUri = $"https://api.twitter.com/2/tweets/search/recent?start_time={startTimeString}&query={queryString}&tweet.fields={tweetFields}&max_results={maxResults}";
+
+                        requestUri += string.IsNullOrWhiteSpace(nextToken) ? string.Empty : $"&next_token={nextToken}";
+
+                        using (var request = new HttpRequestMessage(HttpMethod.Get, requestUri)) {
                             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Environment.GetEnvironmentVariable("TWITTER_API_OAUTH_TOKEN"));
 
                             using (var response = await httpClient.SendAsync(request)) {
@@ -275,6 +277,8 @@ namespace cs_covid19_data_pull {
                                 }
                             }
                         }
+
+                        nextToken = twitterSearchResult?.meta?.next_token;
                     } while (twitterSearchResult.meta.next_token != null);
                 }
             }
@@ -305,20 +309,15 @@ namespace cs_covid19_data_pull {
             var itemsLogged = 0;
 
             foreach (var post in _twitterPosts) {
+                var spreadsheetRows = new List<GoogleSheetRow>();
                 var phoneNumberMatches = Regex.Matches(post.text, phoneNumberPattern);
-
-                if (post.id == "1389475784650334213")
-                {
-                    var x = 10;
-                    logger.LogInformation($"10 {x}");
-                }
 
                 foreach (Match numberMatch in phoneNumberMatches) {
                     var numberMatchValue = numberMatch.Value.Trim(new char[] { ' ', '-' });
                     var numbers = new List<string>();
 
                     if (numberMatchValue.Length > 20 && numberMatchValue.Contains(' ')) {
-                        numbers.AddRange(numberMatchValue.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+                        numbers.AddRange(numberMatchValue.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(number => number.Replace("-", string.Empty)));
                     } else {
                         numbers.Add(numberMatchValue.Replace(" ", string.Empty).Replace("-", string.Empty));
                     }
@@ -359,13 +358,17 @@ namespace cs_covid19_data_pull {
                             }
 
                             // add row to the google spreadsheet
-                            AddSpreadsheetRow(
-                                _locations: string.Join(", ", matchingLocations.Select(location => CapitalizeWord(location))),
-                                _resources: string.Join(", ", matchingResources.Select(resource => CapitalizeWord(resource))),
-                                _resourcesDetails: string.Join(", ", resourceDetails),
-                                _phoneNumber: number,
-                                _dateTweeted: post.created_at,
-                                _tweetText: post.text
+                            spreadsheetRows.Add(
+                                new GoogleSheetRow() {
+                                    Cells = new List<GoogleSheetCell>() {
+                                        new GoogleSheetCell() { CellValue = string.Join(", ", matchingLocations.Select(location => CapitalizeWord(location))) },
+                                        new GoogleSheetCell() { CellValue = string.Join(", ", matchingResources.Select(resource => CapitalizeWord(resource))) },
+                                        new GoogleSheetCell() { CellValue = string.Join(", ", resourceDetails) },
+                                        new GoogleSheetCell() { CellValue = number },
+                                        new GoogleSheetCell() { CellValue = post.created_at },
+                                        new GoogleSheetCell() { CellValue = post.text.Replace("\\n", "\n") },
+                                    }
+                                }
                             );
 
                             logger.LogInformation($"id: {post.id}, locations: {string.Join(", ", matchingLocations)}, resources: {string.Join(", ", matchingResources)}, phone #: {number}, date tweeted: {post.created_at}");
@@ -375,6 +378,8 @@ namespace cs_covid19_data_pull {
                         }
                     }
                 }
+
+                googleSheet.AppendRows(spreadsheetRows, "Sheet1", logger);
             }
 
             logger.LogInformation($"logged {itemsLogged} combinations to output spreadsheet");
@@ -400,22 +405,15 @@ namespace cs_covid19_data_pull {
             return exclusionStrings.Any(term => _post.text.ToLower().Contains(term)) == false;
         }
 
-        public static void AddSpreadsheetRow(
-            string _locations,
-            string _resources,
-            string _resourcesDetails,
-            string _phoneNumber,
-            string _dateTweeted,
-            string _tweetText
-        ) {
+        public static void AppendCompletionSpreadsheetRow() {
             var row = new GoogleSheetRow() {
                 Cells = new List<GoogleSheetCell>() {
-                    new GoogleSheetCell() { CellValue = _locations },
-                    new GoogleSheetCell() { CellValue = _resources },
-                    new GoogleSheetCell() { CellValue = _resourcesDetails },
-                    new GoogleSheetCell() { CellValue = _phoneNumber },
-                    new GoogleSheetCell() { CellValue = _dateTweeted },
-                    new GoogleSheetCell() { CellValue = _tweetText.Replace("\\n", "\n") },
+                    new GoogleSheetCell() { CellValue = "script completed", IsBold = true },
+                    new GoogleSheetCell() { CellValue = "script completed", IsBold = true },
+                    new GoogleSheetCell() { CellValue = "script completed", IsBold = true },
+                    new GoogleSheetCell() { CellValue = "script completed", IsBold = true },
+                    new GoogleSheetCell() { CellValue = "script completed", IsBold = true },
+                    new GoogleSheetCell() { CellValue = "script completed", IsBold = true },
                 }
             };
 
