@@ -152,12 +152,10 @@ namespace cs_covid19_data_pull {
         // run this function once every two hours at the start of the hour, e.g. 12:00 am, 2:00 am, 4:00 am etc.
         // 0 0 */2 * * *
         // see https://docs.microsoft.com/en-us/azure/azure-functions/functions-bindings-timer?tabs=csharp for explanation of cron format
-        // for testing, can use this to run every minute
-        // 0 */1 * * * *
 
         [Function("TwitterDataPull")]
         public static async Task Run(
-            [TimerTrigger("0 0 0 */1 * *" // 1 day script trigger time for manual pulls
+            [TimerTrigger("0 0 */2 * * *" // 2-hour script trigger time for automatic processing
                 #if DEBUG
                 , RunOnStartup=true // https://stackoverflow.com/a/51775445
                 #endif
@@ -177,7 +175,7 @@ namespace cs_covid19_data_pull {
             await LoadUniquePhoneNumbersAsync();
 
             var usingPresetData = false;
-            var twitterPosts = usingPresetData ? ReadLocalData() : await FetchTwitterDataAsync(TimeSpan.FromHours(12));
+            var twitterPosts = usingPresetData ? ReadLocalData() : await FetchTwitterDataAsync(TimeSpan.FromHours(2));
 
             LogData(twitterPosts);
 
