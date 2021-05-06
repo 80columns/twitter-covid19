@@ -118,69 +118,87 @@ namespace twitter {
         }
 
         public void AppendRows(List<GoogleSheetRow> rows, string sheetName, ILogger logger) {
-            if (this.currentRequestCount >= this.maxRequestCountPerMinute) {
-                logger.LogInformation($"current google sheets request count is {this.currentRequestCount} and max request count is {this.maxRequestCountPerMinute}, sleeping for 1 minute...");
-
-                // sleep for 1 minute before making more requests
-                Thread.Sleep(1_000 * 60);
-
-                this.currentRequestCount = 0;
-
-                logger.LogInformation($"finished sleeping for 1 minute");
+            if (this.currentRequestCount + rows.Count >= this.maxRequestCountPerMinute) {
+                PauseGoogleApiCalls(logger, 1_000 * 60);
             }
 
-            var requests = new BatchUpdateSpreadsheetRequest { Requests = new List<Request>() };
-            var sheetId = GetSheetId(sheetsService, spreadsheetId, sheetName);
+            var appended = false;
 
-            var request = new Request {
-                AppendCells = new AppendCellsRequest {
-                    Fields = "*",
-                    SheetId = sheetId
-                }
-            };
+            while (appended == false) {
+                try {
+                    var requests = new BatchUpdateSpreadsheetRequest { Requests = new List<Request>() };
+                    var sheetId = GetSheetId(sheetsService, spreadsheetId, sheetName);
 
-            var listRowData = new List<RowData>();
-
-            foreach (var row in rows) {
-                var rowData = new RowData();
-                var listCellData = new List<CellData>();
-
-                foreach (var cell in row.Cells) {
-                    var cellData = new CellData();
-                    var extendedValue = new ExtendedValue { StringValue = cell.CellValue };
-
-                    cellData.UserEnteredValue = extendedValue;
-                    var cellFormat = new CellFormat { TextFormat = new TextFormat(), WrapStrategy = "Wrap" };
-
-                    if (cell.IsBold) {
-                        cellFormat.TextFormat.Bold = true;
-                    }
-
-                    cellFormat.BackgroundColor = new Color {
-                        Blue = (float)cell.BackgroundColor.B / 255,
-                        Red = (float)cell.BackgroundColor.R / 255,
-                        Green = (float)cell.BackgroundColor.G / 255
+                    var request = new Request {
+                        AppendCells = new AppendCellsRequest {
+                            Fields = "*",
+                            SheetId = sheetId
+                        }
                     };
 
-                    cellData.UserEnteredFormat = cellFormat;
-                    listCellData.Add(cellData);
-                }
+                    var listRowData = new List<RowData>();
 
-                rowData.Values = listCellData;
-                listRowData.Add(rowData);
+                    foreach (var row in rows) {
+                        var rowData = new RowData();
+                        var listCellData = new List<CellData>();
+
+                        foreach (var cell in row.Cells) {
+                            var cellData = new CellData();
+                            var extendedValue = new ExtendedValue { StringValue = cell.CellValue };
+
+                            cellData.UserEnteredValue = extendedValue;
+                            var cellFormat = new CellFormat { TextFormat = new TextFormat(), WrapStrategy = "Wrap" };
+
+                            if (cell.IsBold) {
+                                cellFormat.TextFormat.Bold = true;
+                            }
+
+                            cellFormat.BackgroundColor = new Color {
+                                Blue = (float)cell.BackgroundColor.B / 255,
+                                Red = (float)cell.BackgroundColor.R / 255,
+                                Green = (float)cell.BackgroundColor.G / 255
+                            };
+
+                            cellData.UserEnteredFormat = cellFormat;
+                            listCellData.Add(cellData);
+                        }
+
+                        rowData.Values = listCellData;
+                        listRowData.Add(rowData);
+                    }
+
+                    request.AppendCells.Rows = listRowData;
+
+                    // It's a batch request so you can create more than one request and send them all in one batch. Just use reqs.Requests.Add() to add additional requests for the same spreadsheet
+                    requests.Requests.Add(request);
+
+                    // sleep 200 ms to add delay to requests
+                    Thread.Sleep(200);
+
+                    sheetsService.Spreadsheets.BatchUpdate(requests, spreadsheetId).Execute();
+
+                    this.currentRequestCount += rows.Count;
+
+                    appended = true;
+                } catch (Exception e) {
+                    logger.LogInformation($"caught exception when writing to google spreadsheet, message is {e.Message}, exception type is {e.GetType()}");
+
+                    PauseGoogleApiCalls(logger, 60 * 1_000);
+                }
             }
 
-            request.AppendCells.Rows = listRowData;
+            
+        }
 
-            // It's a batch request so you can create more than one request and send them all in one batch. Just use reqs.Requests.Add() to add additional requests for the same spreadsheet
-            requests.Requests.Add(request);
+        private void PauseGoogleApiCalls(ILogger logger, int millisecondsTimeout) {
+            logger.LogInformation($"current google sheets request count is {this.currentRequestCount} and max request count is {this.maxRequestCountPerMinute}, sleeping for {millisecondsTimeout/1000} seconds...");
 
-            // sleep 200 ms to add delay to requests
-            Thread.Sleep(200);
+            // sleep for 1 minute before making more requests
+            Thread.Sleep(millisecondsTimeout);
 
-            sheetsService.Spreadsheets.BatchUpdate(requests, spreadsheetId).Execute();
+            this.currentRequestCount = 0;
 
-            this.currentRequestCount++;
+            logger.LogInformation($"finished sleeping for 1 minute");
         }
 
         private string GetColumnName(int index) {

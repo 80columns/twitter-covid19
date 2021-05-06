@@ -173,8 +173,13 @@ namespace cs_covid19_data_pull {
             // get the prior phone numbers pulled by the script
             await LoadUniquePhoneNumbersAsync();
 
-            var usingPresetData = false;
-            var twitterPosts = usingPresetData ? ReadLocalData() : await FetchTwitterDataAsync(TimeSpan.FromHours(2));
+            var usingPresetData = true;
+
+            var twitterPosts = usingPresetData ? await ReadLocalData() : await FetchTwitterDataAsync(TimeSpan.FromHours(2));
+
+            if (usingPresetData == false) {
+                await SaveLocalData(twitterPosts);
+            }
 
             LogData(twitterPosts);
 
@@ -217,7 +222,6 @@ namespace cs_covid19_data_pull {
             var tweetFields = string.Join(",", new string[] { "id", "text", "created_at" });
             var iteration = 0;
             var maxResults = 100;
-            var nextToken = string.Empty;
 
             for (var i = 0; i < locationTerms.Length; i++) {
                 for (var j = 0; j < resourceTerms.Length; j++) {
@@ -232,7 +236,7 @@ namespace cs_covid19_data_pull {
                     do {
                         var requestUri = $"https://api.twitter.com/2/tweets/search/recent?start_time={startTimeString}&query={queryString}&tweet.fields={tweetFields}&max_results={maxResults}";
 
-                        requestUri += string.IsNullOrWhiteSpace(nextToken) ? string.Empty : $"&next_token={nextToken}";
+                        requestUri += string.IsNullOrWhiteSpace(twitterSearchResult?.meta?.next_token) ? string.Empty : $"&next_token={twitterSearchResult?.meta?.next_token}";
 
                         using (var request = new HttpRequestMessage(HttpMethod.Get, requestUri)) {
                             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Environment.GetEnvironmentVariable("TWITTER_API_OAUTH_TOKEN"));
@@ -274,9 +278,7 @@ namespace cs_covid19_data_pull {
                                 }
                             }
                         }
-
-                        nextToken = twitterSearchResult?.meta?.next_token;
-                    } while (twitterSearchResult.meta.next_token != null);
+                    } while (twitterSearchResult?.meta?.next_token != null);
                 }
             }
 
@@ -295,10 +297,16 @@ namespace cs_covid19_data_pull {
             logger.LogInformation($"finished sleeping for 15 minutes, resuming data pull");
         }
 
-        public static List<TwitterPost> ReadLocalData() {
-            var data = File.ReadAllText(@"C:\Users\patri\OneDrive\Desktop\CaregiverSaathiCovid19\cs-covid19-data-pull\repo\sampleData.json");
+        public static async Task<List<TwitterPost>> ReadLocalData() {
+            var data = await File.ReadAllTextAsync(@"C:\Users\patri\OneDrive\Desktop\CaregiverSaathiCovid19\cs-covid19-data-pull\repo\sampleData.json");
 
             return JsonConvert.DeserializeObject<List<TwitterPost>>(data);
+        }
+
+        public static async Task SaveLocalData(List<TwitterPost> twitterPosts) {
+            var dataString = JsonConvert.SerializeObject(twitterPosts);
+
+            await File.WriteAllTextAsync(@"C:\Users\patri\OneDrive\Desktop\CaregiverSaathiCovid19\cs-covid19-data-pull\repo\sampleData.json", dataString);
         }
 
         public static void LogData(List<TwitterPost> _twitterPosts) {
@@ -352,24 +360,26 @@ namespace cs_covid19_data_pull {
                             // save phone number for lookup later to ensure we don't process duplicate phone numbers across subsequent runs of this script
                             if (currentRunPhoneNumbers.ContainsKey(number) == false) {
                                 currentRunPhoneNumbers.Add(number, DateTimeOffset.Parse(post.created_at));
-                            }
 
-                            // add row to the google spreadsheet
-                            spreadsheetRows.Add(
-                                new GoogleSheetRow() {
-                                    Cells = new List<GoogleSheetCell>() {
+                                // add row to the google spreadsheet
+                                spreadsheetRows.Add(
+                                    new GoogleSheetRow() {
+                                        Cells = new List<GoogleSheetCell>() {
                                         new GoogleSheetCell() { CellValue = string.Join(", ", matchingLocations.Select(location => CapitalizeWord(location))) },
                                         new GoogleSheetCell() { CellValue = string.Join(", ", matchingResources.Select(resource => CapitalizeWord(resource))) },
                                         new GoogleSheetCell() { CellValue = string.Join(", ", resourceDetails) },
                                         new GoogleSheetCell() { CellValue = number },
                                         new GoogleSheetCell() { CellValue = post.created_at },
                                         new GoogleSheetCell() { CellValue = post.text.Replace("\\n", "\n") },
+                                        }
                                     }
-                                }
-                            );
+                                );
 
-                            logger.LogInformation($"id: {post.id}, locations: {string.Join(", ", matchingLocations)}, resources: {string.Join(", ", matchingResources)}, phone #: {number}, date tweeted: {post.created_at}");
-                            itemsLogged++;
+                                logger.LogInformation($"id: {post.id}, locations: {string.Join(", ", matchingLocations)}, resources: {string.Join(", ", matchingResources)}, phone #: {number}, date tweeted: {post.created_at}");
+                                itemsLogged++;
+                            } else {
+                                logger.LogInformation($"duplicate phone number {number} found within single run, not adding to spreadsheet");
+                            }
                         } else {
                             logger.LogInformation($"id: {post.id}, duplicate phone number {number} found, not adding to spreadsheet");
                         }
