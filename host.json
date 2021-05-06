@@ -8,5 +8,5 @@
             }
         }
     },
-    "functionTimeout": "12:00:00"
+    "functionTimeout": "-1"
 }

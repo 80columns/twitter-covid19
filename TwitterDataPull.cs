@@ -152,7 +152,6 @@ namespace cs_covid19_data_pull {
         // run this function once every two hours at the start of the hour, e.g. 12:00 am, 2:00 am, 4:00 am etc.
         // 0 0 */2 * * *
         // see https://docs.microsoft.com/en-us/azure/azure-functions/functions-bindings-timer?tabs=csharp for explanation of cron format
-
         [Function("TwitterDataPull")]
         public static async Task Run(
             [TimerTrigger("0 0 */2 * * *" // 2-hour script trigger time for automatic processing
@@ -240,7 +239,7 @@ namespace cs_covid19_data_pull {
 
                             using (var response = await httpClient.SendAsync(request)) {
                                 if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests) {
-                                    PauseTwitterApi(iteration);
+                                    PauseTwitterApiQueries(iteration);
 
                                     // decrement i and j to retry the same request again after pausing above
                                     i--;
@@ -270,7 +269,7 @@ namespace cs_covid19_data_pull {
                                     iteration++;
 
                                     if ((iteration + 1) % 450 == 0) {
-                                        PauseTwitterApi(iteration);
+                                        PauseTwitterApiQueries(iteration);
                                     }
                                 }
                             }
@@ -286,7 +285,7 @@ namespace cs_covid19_data_pull {
             return twitterPosts;
         }
 
-        public static void PauseTwitterApi(int iteration) {
+        public static void PauseTwitterApiQueries(int iteration) {
             logger.LogInformation($"sleeping for 15 minutes, {iteration} requests have been made so far to twitter api");
 
             // if 450 requests have been made, sleep for 15 minutes until the next batch of requests can start
@@ -386,7 +385,7 @@ namespace cs_covid19_data_pull {
         public static bool ValidatePhoneNumber(TwitterPost _post) {
             logger.LogInformation($"checking tweet {_post.id} for match");
 
-            var phoneNumberMatch = Regex.IsMatch(_post.text, @"([\s-]*?[0-9][\s-]*?){10,}");
+            var phoneNumberMatch = Regex.IsMatch(_post.text, phoneNumberPattern);
 
             if (phoneNumberMatch) {
                 logger.LogInformation($"tweet {_post.id} matched");
