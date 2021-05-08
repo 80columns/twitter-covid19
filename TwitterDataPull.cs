@@ -129,7 +129,11 @@ namespace cs_covid19_data_pull {
             "my close friend",
             "currently hospitalised",
             "help with an",
-            "#urgenthelp"
+            "#urgenthelp",
+            "plasmarequired",
+            "need a urgent",
+            "pellucid",
+            "sos call"
         };
         private static readonly Dictionary<string, string[]> resourceAdditionalDetails = new() {
             ["plasma"] = new string[] { "[^a-z]a\\+", "[^a-z]a\\-", "[^a-z]b\\+", "[^a-z]b\\-", "[^a-z]o\\+", "[^a-z]o\\-", "[^a-z]ab\\+", "[^a-z]ab\\-" },
@@ -156,7 +160,7 @@ namespace cs_covid19_data_pull {
         public static async Task Run(
             [TimerTrigger("0 0 */2 * * *" // 2-hour script trigger time for automatic processing
                 #if DEBUG
-                , RunOnStartup=true // https://stackoverflow.com/a/51775445
+                , RunOnStartup=false // https://stackoverflow.com/a/51775445
                 #endif
             )] MyInfo myTimer, FunctionContext context) {
 
@@ -167,27 +171,31 @@ namespace cs_covid19_data_pull {
 
             logger = context.GetLogger("TwitterDataPull");
 
-            logger.LogInformation($"Script started at: {DateTimeOffset.UtcNow}");
-            logger.LogInformation($"Next timer schedule at: {myTimer.ScheduleStatus.Next}");
+            try {
+                logger.LogInformation($"Script started at: {DateTimeOffset.UtcNow}");
+                logger.LogInformation($"Next timer schedule at: {myTimer.ScheduleStatus.Next.ToUniversalTime()}");
 
-            // get the prior phone numbers pulled by the script
-            await LoadUniquePhoneNumbersAsync();
+                // get the prior phone numbers pulled by the script
+                await LoadUniquePhoneNumbersAsync();
 
-            var usingPresetData = true;
+                var usingPresetData = false;
 
-            var twitterPosts = usingPresetData ? await ReadLocalData() : await FetchTwitterDataAsync(TimeSpan.FromHours(2));
+                var twitterPosts = usingPresetData ? await ReadLocalData() : await FetchTwitterV2DataAsync(TimeSpan.FromHours(2));
 
-            if (usingPresetData == false) {
-                await SaveLocalData(twitterPosts);
+                if (usingPresetData == false) {
+                    await SaveLocalData(twitterPosts);
+                }
+
+                LogData(twitterPosts);
+
+                await SaveUniquePhoneNumbersAsync();
+
+                AppendCompletionSpreadsheetRow();
+
+                logger.LogInformation($"Script completed at {DateTimeOffset.UtcNow}");
+            } catch (Exception e) {
+                logger.LogInformation($"caught exception in top-level function, message is '{e.Message}' and type is {e.GetType()}");
             }
-
-            LogData(twitterPosts);
-
-            await SaveUniquePhoneNumbersAsync();
-
-            AppendCompletionSpreadsheetRow();
-
-            logger.LogInformation($"Script completed at {DateTimeOffset.UtcNow}");
         }
 
         public static async Task LoadUniquePhoneNumbersAsync() {
@@ -212,7 +220,7 @@ namespace cs_covid19_data_pull {
             await blobClient.UploadAsync(new MemoryStream(Encoding.UTF8.GetBytes(sourceString)), overwrite: true);
         }
 
-        public static async Task<List<TwitterPost>> FetchTwitterDataAsync(TimeSpan _postTimeRange) {
+        public static async Task<List<TwitterPost>> FetchTwitterV2DataAsync(TimeSpan _postTimeRange) {
             var twitterPosts = new List<TwitterPost>();
 
             // find the tweets with the terms in phoneTerms + resourceTerms
@@ -283,6 +291,14 @@ namespace cs_covid19_data_pull {
             }
 
             logger.LogInformation($"got {twitterPosts.Count} total matching posts from twitter api after {iteration} iterations");
+
+            return twitterPosts;
+        }
+
+        public static async Task<List<TwitterPost>> FetchTwitterV11DataAsync(TimeSpan _postTimeRange) {
+            var twitterPosts = new List<TwitterPost>();
+
+
 
             return twitterPosts;
         }
@@ -365,18 +381,17 @@ namespace cs_covid19_data_pull {
                                 spreadsheetRows.Add(
                                     new GoogleSheetRow() {
                                         Cells = new List<GoogleSheetCell>() {
-                                        new GoogleSheetCell() { CellValue = string.Join(", ", matchingLocations.Select(location => CapitalizeWord(location))) },
-                                        new GoogleSheetCell() { CellValue = string.Join(", ", matchingResources.Select(resource => CapitalizeWord(resource))) },
-                                        new GoogleSheetCell() { CellValue = string.Join(", ", resourceDetails) },
-                                        new GoogleSheetCell() { CellValue = number },
-                                        new GoogleSheetCell() { CellValue = post.created_at },
-                                        new GoogleSheetCell() { CellValue = post.text.Replace("\\n", "\n") },
+                                            new GoogleSheetCell() { CellValue = string.Join(", ", matchingLocations.Select(location => CapitalizeWord(location))) },
+                                            new GoogleSheetCell() { CellValue = string.Join(", ", matchingResources.Select(resource => CapitalizeWord(resource))) },
+                                            new GoogleSheetCell() { CellValue = string.Join(", ", resourceDetails) },
+                                            new GoogleSheetCell() { CellValue = number },
+                                            new GoogleSheetCell() { CellValue = post.created_at },
+                                            new GoogleSheetCell() { CellValue = post.text.Replace("\\n", "\n") },
                                         }
                                     }
                                 );
 
                                 logger.LogInformation($"id: {post.id}, locations: {string.Join(", ", matchingLocations)}, resources: {string.Join(", ", matchingResources)}, phone #: {number}, date tweeted: {post.created_at}");
-                                itemsLogged++;
                             } else {
                                 logger.LogInformation($"duplicate phone number {number} found within single run, not adding to spreadsheet");
                             }
@@ -387,6 +402,7 @@ namespace cs_covid19_data_pull {
                 }
 
                 googleSheet.AppendRows(spreadsheetRows, "Sheet1", logger);
+                itemsLogged += spreadsheetRows.Count;
             }
 
             logger.LogInformation($"logged {itemsLogged} combinations to output spreadsheet");
