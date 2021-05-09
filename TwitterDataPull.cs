@@ -3,11 +3,13 @@ using Azure.Storage.Blobs.Models;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -144,7 +146,7 @@ namespace cs_covid19_data_pull {
         private static readonly string phoneNumberPattern = @"([\t -]*?[0-9][\t -]*?){10,}";
 
         // google sheets helper with spreadsheet id
-        private static GoogleSheetsHelper googleSheet = new(Environment.GetEnvironmentVariable("GOOGLE_SHEET_ID"));
+        private static GoogleSheetsHelper googleSheet = new(Environment.GetEnvironmentVariable("GOOGLE_SHEET_ID"), "Sheet1");
 
         // azure blob client
         private static BlobServiceClient blobServiceClient = new(Environment.GetEnvironmentVariable("AZURE_STORAGE_CONNECTION_STRING"));
@@ -180,7 +182,7 @@ namespace cs_covid19_data_pull {
 
                 var usingPresetData = false;
 
-                var twitterPosts = usingPresetData ? await ReadLocalData() : await FetchTwitterV2DataAsync(TimeSpan.FromHours(2));
+                var twitterPosts = usingPresetData ? await ReadLocalV11Data() : await FetchTwitterV11DataAsync(_postTimeRange: TimeSpan.FromHours(2));
 
                 if (usingPresetData == false) {
                     await SaveLocalData(twitterPosts);
@@ -198,9 +200,28 @@ namespace cs_covid19_data_pull {
             }
         }
 
+        private static async Task ResetPhoneNumbersAsync() {
+            var lines = await File.ReadAllLinesAsync(@"C:\Users\patri\OneDrive\Desktop\historicalPhoneNumbers.txt");
+            historicalPhoneNumbers = new Dictionary<string, DateTimeOffset>();
+
+            foreach (var line in lines) {
+                var lineParts = line.Split('\t', StringSplitOptions.RemoveEmptyEntries);
+
+                if (lineParts.Length == 2) {
+                    if (historicalPhoneNumbers.ContainsKey(lineParts[0].Trim()) == false) {
+                        historicalPhoneNumbers.Add(lineParts[0].Trim(), DateTimeOffset.Parse(lineParts[1].Trim()));
+                    }
+                } else {
+                    logger.LogInformation($"invalid line detected");
+                }
+            }
+
+            await SaveUniquePhoneNumbersAsync();
+        }
+
         public static async Task LoadUniquePhoneNumbersAsync() {
-            var containerClient = blobServiceClient.GetBlobContainerClient("phone-numbers");
-            var blobClient = containerClient.GetBlobClient("phoneNumbers.json");
+            var containerClient = blobServiceClient.GetBlobContainerClient(Environment.GetEnvironmentVariable("PHONE_NUMBER_BLOB_CONTAINER"));
+            var blobClient = containerClient.GetBlobClient(Environment.GetEnvironmentVariable("PHONE_NUMBER_JSON_FILE"));
 
             using (var destinationStream = new MemoryStream()) {
                 await blobClient.DownloadToAsync(destinationStream);
@@ -212,8 +233,8 @@ namespace cs_covid19_data_pull {
         }
 
         public static async Task SaveUniquePhoneNumbersAsync() {
-            var containerClient = blobServiceClient.GetBlobContainerClient("phone-numbers");
-            var blobClient = containerClient.GetBlobClient("phoneNumbers.json");
+            var containerClient = blobServiceClient.GetBlobContainerClient(Environment.GetEnvironmentVariable("PHONE_NUMBER_BLOB_CONTAINER"));
+            var blobClient = containerClient.GetBlobClient(Environment.GetEnvironmentVariable("PHONE_NUMBER_JSON_FILE"));
 
             var sourceString = JsonConvert.SerializeObject(historicalPhoneNumbers.Union(currentRunPhoneNumbers).ToDictionary(item => item.Key, item => item.Value));
 
@@ -242,15 +263,14 @@ namespace cs_covid19_data_pull {
                     );
 
                     do {
-                        var requestUri = $"https://api.twitter.com/2/tweets/search/recent?start_time={startTimeString}&query={queryString}&tweet.fields={tweetFields}&max_results={maxResults}";
-
-                        requestUri += string.IsNullOrWhiteSpace(twitterSearchResult?.meta?.next_token) ? string.Empty : $"&next_token={twitterSearchResult?.meta?.next_token}";
+                        var requestUri = $"https://api.twitter.com/2/tweets/search/recent?start_time={startTimeString}&query={queryString}&tweet.fields={tweetFields}&max_results={maxResults}"
+                                         + (string.IsNullOrWhiteSpace(twitterSearchResult?.meta?.next_token) ? string.Empty : $"&next_token={twitterSearchResult?.meta?.next_token}");
 
                         using (var request = new HttpRequestMessage(HttpMethod.Get, requestUri)) {
                             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Environment.GetEnvironmentVariable("TWITTER_API_OAUTH_TOKEN"));
 
                             using (var response = await httpClient.SendAsync(request)) {
-                                if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests) {
+                                if (response.StatusCode == HttpStatusCode.TooManyRequests) {
                                     PauseTwitterApiQueries(iteration);
 
                                     // decrement i and j to retry the same request again after pausing above
@@ -290,21 +310,66 @@ namespace cs_covid19_data_pull {
                 }
             }
 
-            logger.LogInformation($"got {twitterPosts.Count} total matching posts from twitter api after {iteration} iterations");
+            logger.LogInformation($"got {twitterPosts.Count} total matching posts from twitter v2 api after {iteration} iterations");
 
             return twitterPosts;
         }
 
-        public static async Task<List<TwitterPost>> FetchTwitterV11DataAsync(TimeSpan _postTimeRange) {
+        public static async Task<List<TwitterPost>> FetchTwitterV11DataAsync(TimeSpan _postTimeRange, string _startTimeString = null, string _nextToken = null) {
             var twitterPosts = new List<TwitterPost>();
+            var startTime = DateTimeOffset.UtcNow.Subtract(_postTimeRange);
+            var startTimeString = _startTimeString ?? HttpUtility.UrlEncode(startTime.ToString("yyyyMMddHHmm"));
+            var iteration = 0;
+            var maxResults = 500;
+            var nextToken = _nextToken ?? string.Empty;
 
+            var queryString = HttpUtility.UrlEncode(
+                "-is:retweet"
+             + $" ({string.Join(" OR ", locationTerms)})"
+             + $" ({string.Join(" OR ", resourceTerms)})"
+             + $" ({string.Join(" OR ", phoneTerms)})"
+             + $" -{string.Join(" -", exclusionTerms)}"
+            );
 
+            do {
+                var requestUri = $"https://api.twitter.com/1.1/tweets/search/30day/prod.json?fromDate={startTimeString}&query={queryString}&maxResults={maxResults}"
+                                 + (string.IsNullOrWhiteSpace(nextToken) ? string.Empty : $"&next={HttpUtility.UrlEncode(nextToken)}");
+
+                using (var request = new HttpRequestMessage(HttpMethod.Get, requestUri)) {
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Environment.GetEnvironmentVariable("TWITTER_API_OAUTH_TOKEN"));
+
+                    using (var response = await httpClient.SendAsync(request)) {
+                        if (response.StatusCode == HttpStatusCode.TooManyRequests) {
+                            PauseTwitterApiQueries(iteration);
+                        } else {
+                            var responseString = await response.Content.ReadAsStringAsync();
+                            var responseJson = JObject.Parse(responseString);
+
+                            twitterPosts.AddRange(
+                                ParseV11Data(responseJson).Where(post => ValidatePhoneNumber(post))
+                                                          .Where(post => CheckExclusionStrings(post))
+                            );
+
+                            nextToken = responseJson.ContainsKey("next") ? Convert.ToString(responseJson["next"]) : string.Empty;
+
+                            // sleep 200 ms to add delay to the requests
+                            Thread.Sleep(200);
+
+                            logger.LogInformation($"got {responseJson["results"].Count()} posts from twitter api on iteration {iteration}");
+
+                            iteration++;
+                        }
+                    }
+                }
+            } while (string.IsNullOrWhiteSpace(nextToken) == false);
+
+            logger.LogInformation($"got {twitterPosts.Count} total matching posts from twitter v1.1 api after {iteration} iterations");
 
             return twitterPosts;
         }
 
-        public static void PauseTwitterApiQueries(int iteration) {
-            logger.LogInformation($"sleeping for 15 minutes, {iteration} requests have been made so far to twitter api");
+        public static void PauseTwitterApiQueries(int _iteration) {
+            logger.LogInformation($"sleeping for 15 minutes, {_iteration} requests have been made so far to twitter api");
 
             // if 450 requests have been made, sleep for 15 minutes until the next batch of requests can start
             // 1_000 ms (1 sec) * 60 sec/min * 15 min = 900 sec
@@ -313,21 +378,56 @@ namespace cs_covid19_data_pull {
             logger.LogInformation($"finished sleeping for 15 minutes, resuming data pull");
         }
 
-        public static async Task<List<TwitterPost>> ReadLocalData() {
-            var data = await File.ReadAllTextAsync(@"C:\Users\patri\OneDrive\Desktop\CaregiverSaathiCovid19\cs-covid19-data-pull\repo\sampleData.json");
+        public static async Task<List<TwitterPost>> ReadLocalV2Data() {
+            var data = await File.ReadAllTextAsync(@"C:\Users\patri\OneDrive\Desktop\CaregiverSaathiCovid19\cs-covid19-data-pull\repo\sampleDataV2.json");
 
             return JsonConvert.DeserializeObject<List<TwitterPost>>(data);
         }
 
-        public static async Task SaveLocalData(List<TwitterPost> twitterPosts) {
-            var dataString = JsonConvert.SerializeObject(twitterPosts);
+        public static async Task<List<TwitterPost>> ReadLocalV11Data() {
+            var data = await File.ReadAllTextAsync(@"C:\Users\patri\OneDrive\Desktop\CaregiverSaathiCovid19\cs-covid19-data-pull\repo\sampleDataV11.json");
+            var jsonData = JObject.Parse(data);
+            var twitterPosts = ParseV11Data(jsonData);
 
-            await File.WriteAllTextAsync(@"C:\Users\patri\OneDrive\Desktop\CaregiverSaathiCovid19\cs-covid19-data-pull\repo\sampleData.json", dataString);
+            return twitterPosts.Where(post => ValidatePhoneNumber(post))
+                               .Where(post => CheckExclusionStrings(post))
+                               .ToList();
+        }
+
+        public static List<TwitterPost> ParseV11Data(JObject _jsonData) {
+            var twitterPosts = new List<TwitterPost>();
+            var results = _jsonData["results"];
+
+            foreach (JObject result in results) {
+                var text = result.ContainsKey("extended_tweet") ? Convert.ToString(result["extended_tweet"]["full_text"]) : Convert.ToString(result["text"]);
+                var id = Convert.ToString(result["id"]);
+
+                // parse date string from format "Sat May 08 20:35:27 +0000 2021" so it can be parsed to a DateTimeOffset later on
+                var dateCreatedParts = Convert.ToString(result["created_at"]).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var dateCreated = $"{dateCreatedParts[5]} {dateCreatedParts[1]} {dateCreatedParts[2]} {dateCreatedParts[3]} {dateCreatedParts[4]}";
+
+                twitterPosts.Add(
+                    new TwitterPost() {
+                        id = id,
+                        text = text,
+                        created_at = dateCreated
+                    }
+                );
+            }
+
+            return twitterPosts;
+        }
+
+        public static async Task SaveLocalData(List<TwitterPost> _twitterPosts) {
+            var dataString = JsonConvert.SerializeObject(_twitterPosts);
+
+            await File.WriteAllTextAsync(@"C:\Users\patri\OneDrive\Desktop\CaregiverSaathiCovid19\cs-covid19-data-pull\repo\sampleDataOutput.json", dataString);
         }
 
         public static void LogData(List<TwitterPost> _twitterPosts) {
             // record City/Resource/Text/Phone No./Date Tweeted
             var itemsLogged = 0;
+            var postsProcessed = 0;
 
             foreach (var post in _twitterPosts) {
                 var spreadsheetRows = new List<GoogleSheetRow>();
@@ -401,11 +501,18 @@ namespace cs_covid19_data_pull {
                     }
                 }
 
-                googleSheet.AppendRows(spreadsheetRows, "Sheet1", logger);
-                itemsLogged += spreadsheetRows.Count;
+                if (spreadsheetRows.Any()) {
+                    googleSheet.AppendRows(spreadsheetRows, logger);
+                    itemsLogged += spreadsheetRows.Count;
+
+                    logger.LogInformation($"logged {spreadsheetRows.Count} items to output spreadsheet");
+                }
+
+                postsProcessed++;
+                logger.LogInformation($"processed post {postsProcessed} / {_twitterPosts.Count}");
             }
 
-            logger.LogInformation($"logged {itemsLogged} combinations to output spreadsheet");
+            logger.LogInformation($"logged {itemsLogged} total items to output spreadsheet");
         }
 
         public static bool ValidatePhoneNumber(TwitterPost _post) {
@@ -440,18 +547,18 @@ namespace cs_covid19_data_pull {
                 }
             };
 
-            googleSheet.AppendRows(new List<GoogleSheetRow>() { row }, "Sheet1", logger);
+            googleSheet.AppendRows(new List<GoogleSheetRow>() { row }, logger);
         }
 
-        public static string CapitalizeWord(string word) {
-            if (word.ToLower() == "icu") {
+        public static string CapitalizeWord(string _word) {
+            if (_word.ToLower() == "icu") {
                 return "ICU";
-            } else if (word.ToLower() == "ab+") {
+            } else if (_word.ToLower() == "ab+") {
                 return "AB+";
-            } else if (word.ToLower() == "ab-") {
+            } else if (_word.ToLower() == "ab-") {
                 return "AB-";
             } else {
-                return word.Length >= 2 ? word.Substring(0, 1).ToUpper() + word[1..] : word.ToUpper();
+                return _word.Length >= 2 ? _word.Substring(0, 1).ToUpper() + _word[1..] : _word.ToUpper();
             }
         }
     }

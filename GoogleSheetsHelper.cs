@@ -18,10 +18,11 @@ namespace twitter {
 
         private readonly SheetsService sheetsService;
         private readonly string spreadsheetId;
+        private readonly int sheetId;
         private readonly int maxRequestCountPerMinute = 60;
         private int currentRequestCount;
 
-        public GoogleSheetsHelper(string spreadsheetId) {
+        public GoogleSheetsHelper(string _spreadSheetId, string _spreadSheetName) {
             var jsonCredential = JsonConvert.SerializeObject(
                 new Dictionary<string, string>() {
                     ["type"] = Environment.GetEnvironmentVariable("GOOGLE_SHEETS_API_type"),
@@ -39,29 +40,30 @@ namespace twitter {
 
             var credential = GoogleCredential.FromJson(jsonCredential).CreateScoped(apiScopes);
 
-            sheetsService = new SheetsService(
+            this.sheetsService = new SheetsService(
                 new BaseClientService.Initializer() {
                     HttpClientInitializer = credential,
                     ApplicationName = applicationName,
                 }
             );
 
-            this.spreadsheetId = spreadsheetId;
+            this.spreadsheetId = _spreadSheetId;
+            this.sheetId = GetSheetId(_spreadSheetId, _spreadSheetName);
 
             this.currentRequestCount = 0;
         }
 
-        public List<ExpandoObject> GetDataFromSheet(GoogleSheetParameters googleSheetParameters) {
-            googleSheetParameters = MakeGoogleSheetDataRangeColumnsZeroBased(googleSheetParameters);
-            var range = $"{googleSheetParameters.SheetName}!{GetColumnName(googleSheetParameters.RangeColumnStart)}{googleSheetParameters.RangeRowStart}:{GetColumnName(googleSheetParameters.RangeColumnEnd)}{googleSheetParameters.RangeRowEnd}";
+        public List<ExpandoObject> GetDataFromSheet(GoogleSheetParameters _googleSheetParameters) {
+            _googleSheetParameters = MakeGoogleSheetDataRangeColumnsZeroBased(_googleSheetParameters);
+            var range = $"{_googleSheetParameters.SheetName}!{GetColumnName(_googleSheetParameters.RangeColumnStart)}{_googleSheetParameters.RangeRowStart}:{GetColumnName(_googleSheetParameters.RangeColumnEnd)}{_googleSheetParameters.RangeRowEnd}";
 
             var request = sheetsService.Spreadsheets.Values.Get(spreadsheetId, range);
 
-            var numberOfColumns = googleSheetParameters.RangeColumnEnd - googleSheetParameters.RangeColumnStart;
+            var numberOfColumns = _googleSheetParameters.RangeColumnEnd - _googleSheetParameters.RangeColumnStart;
             var columnNames = new List<string>();
             var returnValues = new List<ExpandoObject>();
 
-            if (!googleSheetParameters.FirstRowIsHeaders) {
+            if (!_googleSheetParameters.FirstRowIsHeaders) {
                 for (var i = 0; i <= numberOfColumns; i++) {
                     columnNames.Add($"Column{i}");
                 }
@@ -74,7 +76,7 @@ namespace twitter {
 
             if (values != null && values.Count > 0) {
                 foreach (var row in values) {
-                    if (googleSheetParameters.FirstRowIsHeaders && rowCounter == 0) {
+                    if (_googleSheetParameters.FirstRowIsHeaders && rowCounter == 0) {
                         for (var i = 0; i <= numberOfColumns; i++) {
                             columnNames.Add(row[i].ToString());
                         }
@@ -100,10 +102,10 @@ namespace twitter {
             return returnValues;
         }
 
-        public HashSet<string> GetAllColumnValues(string sheetName, string columnName) {
+        public HashSet<string> GetAllColumnValues(string _sheetName, string _columnName) {
             var columnValues = new HashSet<string>();
 
-            var range = $"{sheetName}!{columnName}:{columnName}";
+            var range = $"{_sheetName}!{_columnName}:{_columnName}";
             var request = sheetsService.Spreadsheets.Values.Get(spreadsheetId, range);
 
             var response = request.Execute();
@@ -117,9 +119,9 @@ namespace twitter {
             return columnValues;
         }
 
-        public void AppendRows(List<GoogleSheetRow> rows, string sheetName, ILogger logger) {
-            if (this.currentRequestCount + rows.Count >= this.maxRequestCountPerMinute) {
-                PauseGoogleApiCalls(logger, 1_000 * 60);
+        public void AppendRows(List<GoogleSheetRow> _rows, ILogger _logger) {
+            if (this.currentRequestCount + _rows.Count >= this.maxRequestCountPerMinute) {
+                PauseGoogleApiCalls(_logger, 1_000 * 60);
             }
 
             var appended = false;
@@ -127,18 +129,17 @@ namespace twitter {
             while (appended == false) {
                 try {
                     var requests = new BatchUpdateSpreadsheetRequest { Requests = new List<Request>() };
-                    var sheetId = GetSheetId(sheetsService, spreadsheetId, sheetName);
 
                     var request = new Request {
                         AppendCells = new AppendCellsRequest {
                             Fields = "*",
-                            SheetId = sheetId
+                            SheetId = this.sheetId
                         }
                     };
 
                     var listRowData = new List<RowData>();
 
-                    foreach (var row in rows) {
+                    foreach (var row in _rows) {
                         var rowData = new RowData();
                         var listCellData = new List<CellData>();
 
@@ -177,53 +178,53 @@ namespace twitter {
 
                     sheetsService.Spreadsheets.BatchUpdate(requests, spreadsheetId).Execute();
 
-                    this.currentRequestCount += rows.Count;
+                    this.currentRequestCount += _rows.Count;
 
                     appended = true;
                 } catch (Exception e) {
-                    logger.LogInformation($"caught exception when writing to google spreadsheet, message is {e.Message}, exception type is {e.GetType()}");
+                    _logger.LogInformation($"caught exception when writing to google spreadsheet, message is {e.Message}, exception type is {e.GetType()}");
 
-                    PauseGoogleApiCalls(logger, 60 * 1_000);
+                    PauseGoogleApiCalls(_logger, 60 * 1_000);
                 }
             }
 
             
         }
 
-        private void PauseGoogleApiCalls(ILogger logger, int millisecondsTimeout) {
-            logger.LogInformation($"current google sheets request count is {this.currentRequestCount} and max request count is {this.maxRequestCountPerMinute}, sleeping for {millisecondsTimeout/1000} seconds...");
+        private void PauseGoogleApiCalls(ILogger _logger, int _millisecondsTimeout) {
+            _logger.LogInformation($"current google sheets request count is {this.currentRequestCount} and max request count is {this.maxRequestCountPerMinute}, sleeping for {_millisecondsTimeout/1000} seconds...");
 
             // sleep for 1 minute before making more requests
-            Thread.Sleep(millisecondsTimeout);
+            Thread.Sleep(_millisecondsTimeout);
 
             this.currentRequestCount = 0;
 
-            logger.LogInformation($"finished sleeping for 1 minute");
+            _logger.LogInformation($"finished sleeping for 1 minute");
         }
 
-        private string GetColumnName(int index) {
+        private string GetColumnName(int _index) {
             const string letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
             var value = "";
 
-            if (index >= letters.Length) {
-                value += letters[index / letters.Length - 1];
+            if (_index >= letters.Length) {
+                value += letters[_index / letters.Length - 1];
             }
 
-            value += letters[index % letters.Length];
+            value += letters[_index % letters.Length];
 
             return value;
         }
 
-        private GoogleSheetParameters MakeGoogleSheetDataRangeColumnsZeroBased(GoogleSheetParameters googleSheetParameters) {
-            googleSheetParameters.RangeColumnStart = googleSheetParameters.RangeColumnStart - 1;
-            googleSheetParameters.RangeColumnEnd = googleSheetParameters.RangeColumnEnd - 1;
+        private GoogleSheetParameters MakeGoogleSheetDataRangeColumnsZeroBased(GoogleSheetParameters _googleSheetParameters) {
+            _googleSheetParameters.RangeColumnStart = _googleSheetParameters.RangeColumnStart - 1;
+            _googleSheetParameters.RangeColumnEnd = _googleSheetParameters.RangeColumnEnd - 1;
 
-            return googleSheetParameters;
+            return _googleSheetParameters;
         }
 
-        private int GetSheetId(SheetsService service, string spreadSheetId, string spreadSheetName) {
-            var spreadsheet = service.Spreadsheets.Get(spreadSheetId).Execute();
-            var sheet = spreadsheet.Sheets.FirstOrDefault(s => s.Properties.Title == spreadSheetName);
+        private int GetSheetId(string _spreadSheetId, string _spreadSheetName) {
+            var spreadsheet = this.sheetsService.Spreadsheets.Get(_spreadSheetId).Execute();
+            var sheet = spreadsheet.Sheets.FirstOrDefault(s => s.Properties.Title == _spreadSheetName);
             var sheetId = (int)sheet.Properties.SheetId;
 
             return sheetId;

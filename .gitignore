@@ -264,5 +264,8 @@ paket-files/
 __pycache__/
 *.pyc
 
-# local data file
+# local data files
 sampleData.json
+sampleDataV11.json
+sampleDataV2.json
+sampleDataOutput.json
