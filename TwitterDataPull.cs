@@ -174,19 +174,23 @@ namespace cs_covid19_data_pull {
             logger = context.GetLogger("TwitterDataPull");
 
             try {
-                logger.LogInformation($"Script started at: {DateTimeOffset.UtcNow}");
-                logger.LogInformation($"Next timer schedule at: {myTimer.ScheduleStatus.Next.ToUniversalTime()}");
+                logger.LogInformation($"Script started at: {DateTimeOffset.UtcNow} UTC");
+                logger.LogInformation($"Next timer schedule at: {myTimer.ScheduleStatus.Next.ToUniversalTime()} UTC");
 
                 // get the prior phone numbers pulled by the script
                 await LoadUniquePhoneNumbersAsync();
 
-                var usingPresetData = false;
+                #if DEBUG
+                    var usingPresetData = false;
 
-                var twitterPosts = usingPresetData ? await ReadLocalV11Data() : await FetchTwitterV11DataAsync(_postTimeRange: TimeSpan.FromHours(2));
+                    var twitterPosts = usingPresetData ? await ReadLocalV11Data() : await FetchTwitterV11DataAsync(_postTimeRange: TimeSpan.FromHours(2));
 
-                if (usingPresetData == false) {
-                    await SaveLocalData(twitterPosts);
-                }
+                    if (usingPresetData == false) {
+                        await SaveLocalData(twitterPosts);
+                    }
+                #else
+                    var twitterPosts = await FetchTwitterV11DataAsync(_postTimeRange: TimeSpan.FromHours(2));
+                #endif
 
                 LogData(twitterPosts);
 
@@ -194,7 +198,7 @@ namespace cs_covid19_data_pull {
 
                 AppendCompletionSpreadsheetRow();
 
-                logger.LogInformation($"Script completed at {DateTimeOffset.UtcNow}");
+                logger.LogInformation($"Script completed at {DateTimeOffset.UtcNow} UTC");
             } catch (Exception e) {
                 logger.LogInformation($"caught exception in top-level function, message is '{e.Message}' and type is {e.GetType()}");
             }

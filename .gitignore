@@ -269,3 +269,6 @@ sampleData.json
 sampleDataV11.json
 sampleDataV2.json
 sampleDataOutput.json
+
+# deployment files
+Properties/ServiceDependencies/*
