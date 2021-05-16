@@ -135,7 +135,8 @@ namespace cs_covid19_data_pull {
             "plasmarequired",
             "need a urgent",
             "pellucid",
-            "sos call"
+            "sos call",
+            "requirement"
         };
         private static readonly Dictionary<string, string[]> resourceAdditionalDetails = new() {
             ["plasma"] = new string[] { "[^a-z]a\\+", "[^a-z]a\\-", "[^a-z]b\\+", "[^a-z]b\\-", "[^a-z]o\\+", "[^a-z]o\\-", "[^a-z]ab\\+", "[^a-z]ab\\-" },
@@ -155,8 +156,11 @@ namespace cs_covid19_data_pull {
         private static Dictionary<string, DateTimeOffset> historicalPhoneNumbers;
         private static Dictionary<string, DateTimeOffset> currentRunPhoneNumbers = new();
 
+        private static bool usingPresetData = false;
+
         // run this function once every two hours at the start of the hour, e.g. 12:00 am, 2:00 am, 4:00 am etc.
         // 0 0 */2 * * *
+        // 0 */1 * * * *
         // see https://docs.microsoft.com/en-us/azure/azure-functions/functions-bindings-timer?tabs=csharp for explanation of cron format
         [Function("TwitterDataPull")]
         public static async Task Run(
@@ -180,17 +184,19 @@ namespace cs_covid19_data_pull {
                 // get the prior phone numbers pulled by the script
                 await LoadUniquePhoneNumbersAsync();
 
-                #if DEBUG
-                    var usingPresetData = false;
+                logger.LogInformation($"pulled {historicalPhoneNumbers.Count} historical phone numbers");
 
+                #if DEBUG
                     var twitterPosts = usingPresetData ? await ReadLocalV11Data() : await FetchTwitterV11DataAsync(_postTimeRange: TimeSpan.FromHours(2));
 
                     if (usingPresetData == false) {
                         await SaveLocalData(twitterPosts);
                     }
                 #else
-                    var twitterPosts = await FetchTwitterV11DataAsync(_postTimeRange: TimeSpan.FromHours(2));
+                    var twitterPosts = usingPresetData ? await ReadStorageAccountV11Data() : await FetchTwitterV11DataAsync(_postTimeRange: TimeSpan.FromHours(2));
                 #endif
+
+                logger.LogInformation($"processing {twitterPosts.Count} posts for extracting phone numbers");
 
                 LogData(twitterPosts);
 
@@ -200,7 +206,12 @@ namespace cs_covid19_data_pull {
 
                 logger.LogInformation($"Script completed at {DateTimeOffset.UtcNow} UTC");
             } catch (Exception e) {
-                logger.LogInformation($"caught exception in top-level function, message is '{e.Message}' and type is {e.GetType()}");
+                #if DEBUG
+                    logger.LogInformation($"caught exception in top-level function, message is '{e.Message}' and type is {e.GetType()}");
+                #else
+                    logger.LogInformation($"caught exception in top-level function, message is '{e.Message}' and type is {e.GetType()}");
+                    throw;
+                #endif
             }
         }
 
@@ -239,8 +250,11 @@ namespace cs_covid19_data_pull {
         public static async Task SaveUniquePhoneNumbersAsync() {
             var containerClient = blobServiceClient.GetBlobContainerClient(Environment.GetEnvironmentVariable("PHONE_NUMBER_BLOB_CONTAINER"));
             var blobClient = containerClient.GetBlobClient(Environment.GetEnvironmentVariable("PHONE_NUMBER_JSON_FILE"));
+            var combinedHistoricalPhoneNumbers = historicalPhoneNumbers.Union(currentRunPhoneNumbers).ToDictionary(item => item.Key, item => item.Value);
 
-            var sourceString = JsonConvert.SerializeObject(historicalPhoneNumbers.Union(currentRunPhoneNumbers).ToDictionary(item => item.Key, item => item.Value));
+            logger.LogInformation($"saved unique phone numbers, count is now {combinedHistoricalPhoneNumbers.Count}");
+
+            var sourceString = JsonConvert.SerializeObject(combinedHistoricalPhoneNumbers);
 
             await blobClient.UploadAsync(new MemoryStream(Encoding.UTF8.GetBytes(sourceString)), overwrite: true);
         }
@@ -396,6 +410,36 @@ namespace cs_covid19_data_pull {
             return twitterPosts.Where(post => ValidatePhoneNumber(post))
                                .Where(post => CheckExclusionStrings(post))
                                .ToList();
+        }
+
+        public static async Task<List<TwitterPost>> ReadStorageAccountV2Data() {
+            var containerClient = blobServiceClient.GetBlobContainerClient("test-data");
+            var blobClient = containerClient.GetBlobClient("sampleDataV2.json");
+
+            using (var destinationStream = new MemoryStream()) {
+                await blobClient.DownloadToAsync(destinationStream);
+
+                var destinationString = Encoding.UTF8.GetString(destinationStream.ToArray());
+
+                return JsonConvert.DeserializeObject<List<TwitterPost>>(destinationString);
+            }
+        }
+
+        public static async Task<List<TwitterPost>> ReadStorageAccountV11Data() {
+            var containerClient = blobServiceClient.GetBlobContainerClient("test-data");
+            var blobClient = containerClient.GetBlobClient("sampleDataV11.json");
+
+            using (var destinationStream = new MemoryStream()) {
+                await blobClient.DownloadToAsync(destinationStream);
+
+                var destinationString = Encoding.UTF8.GetString(destinationStream.ToArray());
+
+                var twitterPosts = ParseV11Data(JObject.Parse(destinationString));
+
+                return twitterPosts.Where(post => ValidatePhoneNumber(post))
+                                   .Where(post => CheckExclusionStrings(post))
+                                   .ToList();
+            }
         }
 
         public static List<TwitterPost> ParseV11Data(JObject _jsonData) {
