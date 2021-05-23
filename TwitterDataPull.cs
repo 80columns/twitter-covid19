@@ -1,5 +1,4 @@
 using Azure.Storage.Blobs;
-using Azure.Storage.Blobs.Models;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
@@ -43,62 +42,10 @@ namespace cs_covid19_data_pull {
         private static ILogger logger;
         private static HttpClient httpClient = new();
 
-        // twitter query search terms
-        #region twitterSearchTerms
-        private static readonly string[] phoneTerms = new string[] {
-            "contact",
-            "verified",
-            "number",
-            "numbers",
-            "whatsapp",
-            "\"whats app\"",
-            "helpline",
-            "call"
-        };
-        private static readonly string[] resourceTerms = new string[] {
-            "ambulance",
-            "\"home quarantine\"",
-            "hospital",
-            "beds",
-            "ventilator",
-            "icu",
-            //"remdesivir",
-            "tocilizumab",
-            "fabiflu",
-            "favipiravir",
-            "oxygen",
-            "plasma",
-            "tiffin"
-        };
-        private static readonly string[] locationTerms = new string[] {
-            "allahabad",
-            "prayagraj",
-            "pune",
-            "nashik",
-            "nasik",
-            "nagpur",
-            "mumbai",
-            "bombay",
-            "chennai",
-            "thane",
-            "delhi",
-            "gurgaon",
-            "ghaziabad",
-            "bengaluru",
-            "bangalore",
-            "lucknow",
-            "varanasi",
-            "kanpur",
-            "indore",
-            "ahmedabad",
-            "amdavad",
-            "patna",
-            "bhopal",
-            "hyderabad",
-            "vijaywada",
-            "kolkata"
-        };
-        private static readonly string[] exclusionTerms = new string[] {
+        private static string[] twitterLocationTerms;
+        private static string[] twitterResourceTerms;
+        private static string[] twitterPhoneTerms;
+        private static readonly string[] twitterExclusionTerms = new string[] {
             "need",
             "needed",
             "needs",
@@ -120,10 +67,9 @@ namespace cs_covid19_data_pull {
             "\"admitted to\"",
             "condition"
         };
-        #endregion
 
         // separate exclusion terms here due to twitter length restriction on query string
-        private static readonly string[] exclusionStrings = new string[] {
+        private static readonly string[] localExclusionStrings = new string[] {
             "urgently looking",
             "needs a plasma donor",
             "any potential",
@@ -166,7 +112,7 @@ namespace cs_covid19_data_pull {
         public static async Task Run(
             [TimerTrigger("0 0 */2 * * *" // 2-hour script trigger time for automatic processing
                 #if DEBUG
-                , RunOnStartup=false // https://stackoverflow.com/a/51775445
+                , RunOnStartup=true // https://stackoverflow.com/a/51775445
                 #endif
             )] MyInfo myTimer, FunctionContext context) {
 
@@ -180,6 +126,10 @@ namespace cs_covid19_data_pull {
             try {
                 logger.LogInformation($"Script started at: {DateTimeOffset.UtcNow} UTC");
                 logger.LogInformation($"Next timer schedule at: {myTimer.ScheduleStatus.Next.ToUniversalTime()} UTC");
+
+                twitterLocationTerms = (await googleSheet.GetAllColumnValuesAsync("Sheet2", "A", _ignoreHeader: true)).Select(city => city.Contains(' ') ? $"\"{city}\"" : city).ToArray();
+                twitterResourceTerms = (await googleSheet.GetAllColumnValuesAsync("Sheet2", "B", _ignoreHeader: true)).Select(resource => resource.Contains(' ') ? $"\"{resource}\"" : resource).ToArray();
+                twitterPhoneTerms = (await googleSheet.GetAllColumnValuesAsync("Sheet2", "C", _ignoreHeader: true)).Select(phoneTerm => phoneTerm.Contains(' ') ? $"\"{phoneTerm}\"" : phoneTerm).ToArray();
 
                 // get the prior phone numbers pulled by the script
                 await LoadUniquePhoneNumbersAsync();
@@ -270,14 +220,14 @@ namespace cs_covid19_data_pull {
             var iteration = 0;
             var maxResults = 100;
 
-            for (var i = 0; i < locationTerms.Length; i++) {
-                for (var j = 0; j < resourceTerms.Length; j++) {
+            for (var i = 0; i < twitterLocationTerms.Length; i++) {
+                for (var j = 0; j < twitterResourceTerms.Length; j++) {
                     var queryString = HttpUtility.UrlEncode(
                         "-is:retweet"
-                     + $" {locationTerms[i]}"
-                     + $" {resourceTerms[j]}"
-                     + $" -{string.Join(" -", exclusionTerms)}"
-                     + $" ({string.Join(" OR ", phoneTerms)})"
+                     + $" {twitterLocationTerms[i]}"
+                     + $" {twitterResourceTerms[j]}"
+                     + $" -{string.Join(" -", twitterExclusionTerms)}"
+                     + $" ({string.Join(" OR ", twitterPhoneTerms)})"
                     );
 
                     do {
@@ -308,7 +258,7 @@ namespace cs_covid19_data_pull {
                                                                     .Where(post => CheckExclusionStrings(post))
                                         );
                                     } else {
-                                        logger.LogInformation($"no results returned when looking for posts with location {locationTerms[i]} and resource {resourceTerms[j]} after {startTime} UTC");
+                                        logger.LogInformation($"no results returned when looking for posts with location {twitterLocationTerms[i]} and resource {twitterResourceTerms[j]} after {startTime} UTC");
                                     }
 
                                     // sleep 200 ms to add delay to the requests
@@ -340,46 +290,59 @@ namespace cs_covid19_data_pull {
             var iteration = 0;
             var maxResults = 500;
             var nextToken = _nextToken ?? string.Empty;
+            var locationLimit = 30;
 
-            var queryString = HttpUtility.UrlEncode(
-                "-is:retweet"
-             + $" ({string.Join(" OR ", locationTerms)})"
-             + $" ({string.Join(" OR ", resourceTerms)})"
-             + $" ({string.Join(" OR ", phoneTerms)})"
-             + $" -{string.Join(" -", exclusionTerms)}"
-            );
+            // query using 30 locations at a time so the query string isn't longer than 1024 characters
+            for (var i = 0; i < twitterLocationTerms.Length; i += locationLimit) {
+                locationLimit = (i + locationLimit > twitterLocationTerms.Length) ? twitterLocationTerms.Length - i : locationLimit;
 
-            do {
-                var requestUri = $"https://api.twitter.com/1.1/tweets/search/30day/prod.json?fromDate={startTimeString}&query={queryString}&maxResults={maxResults}"
-                                 + (string.IsNullOrWhiteSpace(nextToken) ? string.Empty : $"&next={HttpUtility.UrlEncode(nextToken)}");
+                var currentTwitterLocationTerms = twitterLocationTerms.ToList().GetRange(i, locationLimit);
 
-                using (var request = new HttpRequestMessage(HttpMethod.Get, requestUri)) {
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Environment.GetEnvironmentVariable("TWITTER_API_OAUTH_TOKEN"));
+                var queryString = HttpUtility.UrlEncode(
+                    "-is:retweet"
+                 + $" ({string.Join(" OR ", currentTwitterLocationTerms)})"
+                 + $" ({string.Join(" OR ", twitterResourceTerms)})"
+                 + $" ({string.Join(" OR ", twitterPhoneTerms)})"
+                 + $" -{string.Join(" -", twitterExclusionTerms)}"
+                );
 
-                    using (var response = await httpClient.SendAsync(request)) {
-                        if (response.StatusCode == HttpStatusCode.TooManyRequests) {
-                            PauseTwitterApiQueries(iteration);
-                        } else {
-                            var responseString = await response.Content.ReadAsStringAsync();
-                            var responseJson = JObject.Parse(responseString);
+                do {
+                    var requestUri = $"https://api.twitter.com/1.1/tweets/search/30day/prod.json?fromDate={startTimeString}&query={queryString}&maxResults={maxResults}"
+                                     + (string.IsNullOrWhiteSpace(nextToken) ? string.Empty : $"&next={HttpUtility.UrlEncode(nextToken)}");
 
-                            twitterPosts.AddRange(
-                                ParseV11Data(responseJson).Where(post => ValidatePhoneNumber(post))
-                                                          .Where(post => CheckExclusionStrings(post))
-                            );
+                    using (var request = new HttpRequestMessage(HttpMethod.Get, requestUri)) {
+                        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Environment.GetEnvironmentVariable("TWITTER_API_OAUTH_TOKEN"));
 
-                            nextToken = responseJson.ContainsKey("next") ? Convert.ToString(responseJson["next"]) : string.Empty;
+                        var retryRequest = true;
 
-                            // sleep 200 ms to add delay to the requests
-                            Thread.Sleep(200);
+                        while (retryRequest) {
+                            using (var response = await httpClient.SendAsync(request)) {
+                                if (response.StatusCode == HttpStatusCode.TooManyRequests) {
+                                    PauseTwitterApiQueries(iteration);
+                                } else {
+                                    var responseString = await response.Content.ReadAsStringAsync();
+                                    var responseJson = JObject.Parse(responseString);
 
-                            logger.LogInformation($"got {responseJson["results"].Count()} posts from twitter api on iteration {iteration}");
+                                    twitterPosts.AddRange(
+                                        ParseV11Data(responseJson).Where(post => ValidatePhoneNumber(post))
+                                                                  .Where(post => CheckExclusionStrings(post))
+                                    );
 
-                            iteration++;
+                                    nextToken = responseJson.ContainsKey("next") ? Convert.ToString(responseJson["next"]) : string.Empty;
+
+                                    // sleep 200 ms to add delay to the requests
+                                    Thread.Sleep(200);
+
+                                    logger.LogInformation($"got {responseJson["results"].Count()} posts from twitter api on iteration {iteration}");
+
+                                    iteration++;
+                                    retryRequest = false;
+                                }
+                            }
                         }
                     }
-                }
-            } while (string.IsNullOrWhiteSpace(nextToken) == false);
+                } while (string.IsNullOrWhiteSpace(nextToken) == false);
+            }
 
             logger.LogInformation($"got {twitterPosts.Count} total matching posts from twitter v1.1 api after {iteration} iterations");
 
@@ -502,8 +465,8 @@ namespace cs_covid19_data_pull {
                             number = number.Substring(2, number.Length - 2);
                         }
 
-                        var matchingLocations = locationTerms.Where(location => post.text.ToLower().Contains(location));
-                        var matchingResources = resourceTerms.Where(resource => post.text.ToLower().Contains(resource));
+                        var matchingLocations = twitterLocationTerms.Where(location => post.text.ToLower().Contains(location));
+                        var matchingResources = twitterResourceTerms.Where(resource => post.text.ToLower().Contains(resource));
                         var resourceDetails = new List<string>();
 
                         foreach (var resource in matchingResources) {
@@ -532,7 +495,7 @@ namespace cs_covid19_data_pull {
                                             new GoogleSheetCell() { CellValue = string.Join(", ", matchingLocations.Select(location => CapitalizeWord(location))) },
                                             new GoogleSheetCell() { CellValue = string.Join(", ", matchingResources.Select(resource => CapitalizeWord(resource))) },
                                             new GoogleSheetCell() { CellValue = string.Join(", ", resourceDetails) },
-                                            new GoogleSheetCell() { CellValue = number },
+                                            new GoogleSheetCell() { CellValue = $"+91{number}" },
                                             new GoogleSheetCell() { CellValue = post.created_at },
                                             new GoogleSheetCell() { CellValue = post.text.Replace("\\n", "\n") },
                                         }
@@ -580,7 +543,7 @@ namespace cs_covid19_data_pull {
         }
 
         public static bool CheckExclusionStrings(TwitterPost _post) {
-            return exclusionStrings.Any(term => _post.text.ToLower().Contains(term)) == false;
+            return localExclusionStrings.Any(term => _post.text.ToLower().Contains(term)) == false;
         }
 
         public static void AppendCompletionSpreadsheetRow() {

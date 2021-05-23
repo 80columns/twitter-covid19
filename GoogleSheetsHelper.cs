@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Dynamic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace twitter {
     // code referenced from https://www.hardworkingnerd.com/how-to-read-and-write-to-google-sheets-with-c/
@@ -102,17 +103,20 @@ namespace twitter {
             return returnValues;
         }
 
-        public HashSet<string> GetAllColumnValues(string _sheetName, string _columnName) {
+        public async Task<HashSet<string>> GetAllColumnValuesAsync(string _sheetName, string _columnName, bool _ignoreHeader = false) {
             var columnValues = new HashSet<string>();
 
             var range = $"{_sheetName}!{_columnName}:{_columnName}";
-            var request = sheetsService.Spreadsheets.Values.Get(spreadsheetId, range);
+            var request = sheetsService.Spreadsheets.Values.Get(this.spreadsheetId, range);
 
-            var response = request.Execute();
+            var response = await request.ExecuteAsync();
 
             if (response.Values != null && response.Values.Count > 0) {
-                foreach (var cell in response.Values) {
-                    columnValues.Add(Convert.ToString(cell[0]));
+                // skip the first column value if there is a header cell that should be ignored
+                var i = _ignoreHeader ? 1 : 0;
+
+                for (; i < response.Values.Count; i++) {
+                    columnValues.Add(Convert.ToString(response.Values[i][0]).ToLower());
                 }
             }
 
