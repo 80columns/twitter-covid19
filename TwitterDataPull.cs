@@ -82,7 +82,18 @@ namespace cs_covid19_data_pull {
             "need a urgent",
             "pellucid",
             "sos call",
-            "requirement"
+            "requirement",
+            "please see and help",
+            "is looking for",
+            "is suffering from",
+            "is admitted in",
+            "is struggling",
+            "dream home",
+            "is severely affected",
+            "they are looking for",
+            "admission date",
+            "luxury apartments",
+            "plese help"
         };
         private static readonly Dictionary<string, string[]> resourceAdditionalDetails = new() {
             ["plasma"] = new string[] { "[^a-z]a\\+", "[^a-z]a\\-", "[^a-z]b\\+", "[^a-z]b\\-", "[^a-z]o\\+", "[^a-z]o\\-", "[^a-z]ab\\+", "[^a-z]ab\\-" },
@@ -137,13 +148,13 @@ namespace cs_covid19_data_pull {
                 logger.LogInformation($"pulled {historicalPhoneNumbers.Count} historical phone numbers");
 
                 #if DEBUG
-                    var twitterPosts = usingPresetData ? await ReadLocalV11Data() : await FetchTwitterV11DataAsync(_postTimeRange: TimeSpan.FromHours(2));
+                    var twitterPosts = usingPresetData ? await ReadLocalV2Data() : await FetchTwitterV2DataAsync(_postTimeRange: TimeSpan.FromHours(2));
 
                     if (usingPresetData == false) {
                         await SaveLocalData(twitterPosts);
                     }
                 #else
-                    var twitterPosts = usingPresetData ? await ReadStorageAccountV11Data() : await FetchTwitterV11DataAsync(_postTimeRange: TimeSpan.FromHours(2));
+                    var twitterPosts = usingPresetData ? await ReadStorageAccountV2Data() : await FetchTwitterV2DataAsync(_postTimeRange: TimeSpan.FromHours(2));
                 #endif
 
                 logger.LogInformation($"processing {twitterPosts.Count} posts for extracting phone numbers");
@@ -220,11 +231,18 @@ namespace cs_covid19_data_pull {
             var iteration = 0;
             var maxResults = 100;
 
-            for (var i = 0; i < twitterLocationTerms.Length; i++) {
+            // search for 3 locations at a time to reduce the number of api calls below
+            // the total # of api calls below needs to be < 450 as the twitter api limits us to 450 queries per 15 minutes,
+            // and azure functions consumption plan limits function runtime to 10 minutes so we can't actually wait 15 min and retry after an http 429 response
+            var locationTermLimit = 3;
+
+            for (var i = 0; i < twitterLocationTerms.Length; i += locationTermLimit) {
+                locationTermLimit = (i + locationTermLimit > twitterLocationTerms.Length) ? twitterLocationTerms.Length - i : locationTermLimit;
+
                 for (var j = 0; j < twitterResourceTerms.Length; j++) {
                     var queryString = HttpUtility.UrlEncode(
                         "-is:retweet"
-                     + $" {twitterLocationTerms[i]}"
+                     + $" ({string.Join(" OR ", twitterLocationTerms[i..(i + locationTermLimit)])})"
                      + $" {twitterResourceTerms[j]}"
                      + $" -{string.Join(" -", twitterExclusionTerms)}"
                      + $" ({string.Join(" OR ", twitterPhoneTerms)})"
@@ -258,11 +276,11 @@ namespace cs_covid19_data_pull {
                                                                     .Where(post => CheckExclusionStrings(post))
                                         );
                                     } else {
-                                        logger.LogInformation($"no results returned when looking for posts with location {twitterLocationTerms[i]} and resource {twitterResourceTerms[j]} after {startTime} UTC");
+                                        logger.LogInformation($"no results returned when looking for posts with locations {string.Join('/', twitterLocationTerms[i..(i + locationTermLimit)])} and resource {twitterResourceTerms[j]} after {startTime} UTC");
                                     }
 
-                                    // sleep 200 ms to add delay to the requests
-                                    Thread.Sleep(200);
+                                    // sleep 300 ms to add delay to the requests
+                                    Thread.Sleep(300);
 
                                     logger.LogInformation($"got {twitterSearchResult.meta.result_count} posts from twitter api on iteration {iteration}");
 
