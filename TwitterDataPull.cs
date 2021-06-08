@@ -45,44 +45,33 @@ namespace cs_covid19_data_pull {
         private static string[] twitterLocationTerms;
         private static string[] twitterResourceTerms;
         private static string[] twitterPhoneTerms;
-        private static readonly string[] twitterExclusionTerms = new string[] {
-            "need",
-            "needed",
-            "needs",
-            "required",
-            "require",
-            "patient",
-            "\"request for\"",
-            "\"urgent help\"",
-            "\"please help\"",
-            "\"plz help\"",
-            "\"pls help\"",
-            "\"bot link\"",
-            "requirement",
-            "requirements",
-            "relative",
-            "symptoms",
-            "\"help please\"",
-            "\"can you help\"",
-            "\"admitted to\"",
-            "condition"
-        };
 
         // separate exclusion terms here due to twitter length restriction on query string
         private static readonly string[] localExclusionStrings = new string[] {
+            "need",
+            "require",
+            "patient",
+            "request for",
+            "urgent help",
+            "please help",
+            "plz help",
+            "pls help",
+            "bot link",
+            "relative",
+            "symptoms",
+            "help please",
+            "can you help",
+            "admitted to",
+            "condition",
             "urgently looking",
-            "needs a plasma donor",
             "any potential",
             "looking for a",
             "my close friend",
             "currently hospitalised",
             "help with an",
             "#urgenthelp",
-            "plasmarequired",
-            "need a urgent",
             "pellucid",
             "sos call",
-            "requirement",
             "please see and help",
             "is looking for",
             "is suffering from",
@@ -231,10 +220,10 @@ namespace cs_covid19_data_pull {
             var iteration = 0;
             var maxResults = 100;
 
-            // search for 3 locations at a time to reduce the number of api calls below
+            // search for 15 locations at a time to reduce the number of api calls below
             // the total # of api calls below needs to be < 450 as the twitter api limits us to 450 queries per 15 minutes,
-            // and azure functions consumption plan limits function runtime to 10 minutes so we can't actually wait 15 min and retry after an http 429 response
-            var locationTermLimit = 3;
+            // and azure functions consumption plan limits function runtime to 10 minutes so when running in azure, we can't actually wait 15 min and retry after an http 429 response
+            var locationTermLimit = 15;
 
             for (var i = 0; i < twitterLocationTerms.Length; i += locationTermLimit) {
                 locationTermLimit = (i + locationTermLimit > twitterLocationTerms.Length) ? twitterLocationTerms.Length - i : locationTermLimit;
@@ -244,7 +233,6 @@ namespace cs_covid19_data_pull {
                         "-is:retweet"
                      + $" ({string.Join(" OR ", twitterLocationTerms[i..(i + locationTermLimit)])})"
                      + $" {twitterResourceTerms[j]}"
-                     + $" -{string.Join(" -", twitterExclusionTerms)}"
                      + $" ({string.Join(" OR ", twitterPhoneTerms)})"
                     );
 
@@ -259,8 +247,7 @@ namespace cs_covid19_data_pull {
                                 if (response.StatusCode == HttpStatusCode.TooManyRequests) {
                                     PauseTwitterApiQueries(iteration);
 
-                                    // decrement i and j to retry the same request again after pausing above
-                                    i--;
+                                    // decrement j to retry the same request again after pausing above
                                     j--;
                                 } else {
                                     var responseString = await response.Content.ReadAsStringAsync();
@@ -321,7 +308,6 @@ namespace cs_covid19_data_pull {
                  + $" ({string.Join(" OR ", currentTwitterLocationTerms)})"
                  + $" ({string.Join(" OR ", twitterResourceTerms)})"
                  + $" ({string.Join(" OR ", twitterPhoneTerms)})"
-                 + $" -{string.Join(" -", twitterExclusionTerms)}"
                 );
 
                 do {
